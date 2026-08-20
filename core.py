@@ -204,7 +204,8 @@ def collect_vertex_arrays(entries):
 
 
 def build_and_link(context, name, faces, arrays, flip_winding, flip_texcoord_v,
-                   scale=1.0, mirror_x=False, axis_forward='-Y', axis_up='Z'):
+                   scale=1.0, mirror_x=False, axis_forward='-Y', axis_up='Z',
+                   armature_name=None):
     # 未提供面索引时需用原始顶点数生成顺序三角形
     positions_orig = arrays.get(('POSITION', 0))
     if positions_orig is None:
@@ -236,6 +237,15 @@ def build_and_link(context, name, faces, arrays, flip_winding, flip_texcoord_v,
             sk_groups.append(_trim_shapekey_data(sk_offsets, sk_ids, sk_vecs))
     shape_keys = sk_groups if sk_groups else None
 
+    # 骨骼矩阵为按骨骼组织的分段数据（非逐顶点），须在顶点压缩前取出
+    # 取第一个 BONEMATRIX 条目（多组骨骼暂只支持一组）
+    bone_matrices = None
+    for key in [k for k in list(arrays.keys()) if k[0] == 'BONEMATRIX']:
+        data = arrays.pop(key, None)
+        if data is not None:
+            bone_matrices = numpy.ascontiguousarray(data).reshape(-1, 3, 4)
+            break
+
     # 顶点压缩会对所有数组做 v_min 重基与切片，
     # 之后所有属性必须从压缩后的 arrays 中重新取，否则与 faces 索引不一致
     faces, arrays, v_min = buffer_io.compact_vertices(faces, arrays)
@@ -257,6 +267,12 @@ def build_and_link(context, name, faces, arrays, flip_winding, flip_texcoord_v,
     if positions is None:
         raise buffer_io.BufferIOError('缺少顶点位置（POSITION）数据')
 
+    # 坐标系变换：将源坐标轴映射到 Blender 的 -Y 前 / Z 上，
+    # 作用于顶点/法线/形态键与骨骼矩阵数据本身，对象保持无变换
+    conversion = axis_conversion(
+        from_forward=axis_forward, from_up=axis_up,
+        to_forward='-Y', to_up='Z').to_4x4()
+
     obj = buffer_io.build_object(
         name, faces, positions,
         normals=get_first('NORMAL'),
@@ -272,16 +288,23 @@ def build_and_link(context, name, faces, arrays, flip_winding, flip_texcoord_v,
         flip_texcoord_v=flip_texcoord_v,
         scale=scale,
         mirror_x=mirror_x,
+        conversion=conversion,
     )
-
-    # 坐标系变换：将源坐标轴映射到 Blender 的 -Y 前 / Z 上
-    # （显式指定目标轴，使默认 -Y/Z 返回单位阵，保持原有行为不变）
-    obj.matrix_world = axis_conversion(
-        from_forward=axis_forward, from_up=axis_up,
-        to_forward='-Y', to_up='Z').to_4x4()
 
     collection = context.collection or context.scene.collection
     collection.objects.link(obj)
+
+    # 自动创建骨架：骨骼矩阵 + 顶点组权重 -> Armature 蒙皮
+    if bone_matrices is not None and len(bone_matrices):
+        arm_obj = buffer_io.build_armature(
+            armature_name or f'{name}_Armature', bone_matrices,
+            scale=scale, mirror_x=mirror_x, conversion=conversion,
+            collection=collection)
+        modifier = obj.modifiers.new(name='Armature', type='ARMATURE')
+        modifier.object = arm_obj
+        # 骨架设为模型的父级（对象本身保持无变换）
+        obj.parent = arm_obj
+
     obj.select_set(True)
     context.view_layer.objects.active = obj
     return obj

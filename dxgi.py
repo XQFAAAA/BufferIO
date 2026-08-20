@@ -32,10 +32,24 @@ _NORMALIZE_DIVISOR = {
 
 _components_pattern = re.compile(r'(?<![0-9])(32|16|8)(?![0-9])')
 
+# 非标准分量布局的格式：名称 -> (分量数, 字节宽度, numpy 类型)
+# MATRIX3X4_FLOAT：骨骼 3×4 矩阵（12 个 float32 = 48 字节，行主序）
+_MATRIX_FORMATS = {
+    'MATRIX3X4_FLOAT': (12, 48, numpy.float32),
+}
+
 
 class DXGIFormat:
     def __init__(self, name: str):
         self.name = name.strip().upper().replace('DXGI_FORMAT_', '')
+
+        matrix_fmt = _MATRIX_FORMATS.get(self.name)
+        if matrix_fmt is not None:
+            self.type_suffix = 'FLOAT'
+            self.bit_width = 32
+            self.num_values, self.byte_width, self.numpy_type = matrix_fmt
+            self.normalize_divisor = None
+            return
 
         type_suffix = None
         for suffix in _TYPE_SUFFIXES:
@@ -91,8 +105,8 @@ def _build_format_items():
 
 
 SUPPORTED_FORMATS = _build_format_items()
-# 常见但命名不规则的格式（B8G8R8A8 = BGRA 排列）
-for _extra in ('B8G8R8A8_UNORM', 'B8G8R8A8_SNORM'):
+# 常见但命名不规则的格式（B8G8R8A8 = BGRA 排列）与骨骼矩阵格式
+for _extra in ('B8G8R8A8_UNORM', 'B8G8R8A8_SNORM', 'MATRIX3X4_FLOAT'):
     try:
         DXGIFormat(_extra)
         if _extra not in SUPPORTED_FORMATS:

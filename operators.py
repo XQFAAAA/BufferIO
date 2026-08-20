@@ -550,13 +550,22 @@ class BUFFERIO_OT_import_mesh(bpy.types.Operator):
             self.report({'WARNING'}, f'缺少必需语义：{", ".join(result["missing"])}')
         try:
             faces, arrays = collect_vertex_arrays(attrs)
-            obj = build_and_link(context, 'BufferIO_Mesh', faces, arrays,
+            # 网格名取 INDEX 条目文件名；骨架名取 BONEMATRIX 条目文件名（骨骼矩阵文件）
+            index_path = next(
+                (a.filepath or a.ib_txt for a in attrs
+                 if a.enabled and a.semantic == 'INDEX' and (a.filepath or a.ib_txt)), None)
+            mesh_name = Path(index_path).name if index_path else 'BufferIO_Mesh'
+            bone_path = next(
+                (a.filepath for a in attrs
+                 if a.enabled and a.semantic == 'BONEMATRIX' and a.filepath), None)
+            obj = build_and_link(context, mesh_name, faces, arrays,
                                  scene.bufferio_flip_winding,
                                  scene.bufferio_flip_texcoord_v,
                                  scale=scene.bufferio_global_scale,
                                  mirror_x=scene.bufferio_mirror_x,
                                  axis_forward=scene.bufferio_axis_forward,
-                                 axis_up=scene.bufferio_axis_up)
+                                 axis_up=scene.bufferio_axis_up,
+                                 armature_name=Path(bone_path).name if bone_path else None)
         except Exception as e:
             self.report({'ERROR'}, str(e))
             return {'CANCELLED'}
@@ -595,14 +604,28 @@ class BUFFERIO_OT_import_fmt(bpy.types.Operator):
                         offset=scene.bufferio_ib_offset,
                         first=scene.bufferio_ib_first, count=scene.bufferio_ib_count)
 
+            # 网格名取 INDEX 文件名；骨架名优先取 BONEMATRIX 元素文件名（骨骼矩阵文件）
+            index_path = next(
+                (e.filepath or e.ib_txt for e in elements
+                 if e.semantic == 'INDEX' and (e.filepath or e.ib_txt)), None)
+            if not index_path and scene.bufferio_ib_file:
+                index_path = scene.bufferio_ib_file
+            mesh_name = Path(index_path).name if index_path \
+                else (Path(scene.bufferio_fmt_path).stem or 'BufferIO_FMT')
+            bone_path = next(
+                (e.filepath for e in elements
+                 if e.semantic == 'BONEMATRIX' and e.filepath), None)
+            arm_name = Path(bone_path).name if bone_path \
+                else (Path(scene.bufferio_fmt_path).name or None)
+
             obj = build_and_link(
-                context, Path(scene.bufferio_fmt_path).stem or 'BufferIO_FMT',
-                faces, arrays,
+                context, mesh_name, faces, arrays,
                 scene.bufferio_flip_winding, scene.bufferio_flip_texcoord_v,
                 scale=scene.bufferio_global_scale,
                 mirror_x=scene.bufferio_mirror_x,
                 axis_forward=scene.bufferio_axis_forward,
-                axis_up=scene.bufferio_axis_up)
+                axis_up=scene.bufferio_axis_up,
+                armature_name=arm_name)
         except Exception as e:
             self.report({'ERROR'}, str(e))
             return {'CANCELLED'}

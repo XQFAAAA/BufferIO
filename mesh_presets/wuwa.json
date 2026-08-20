@@ -2,7 +2,7 @@
   {
     "semantic": "INDEX",
     "semantic_index": 0,
-    "format": "R16_UINT",
+    "format": "R32_UINT",
     "stride": 0,
     "offset": 0,
     "name": "ib"
@@ -102,5 +102,69 @@
     "stride": 16,
     "offset": 12,
     "name": "vb4"
+  },
+  {
+    "semantic": "SHAPEKEY",
+    "semantic_index": 0,
+    "format": "R32G32B32_FLOAT",
+    "stride": 0,
+    "offset": 0,
+    "name": "vb6"
+  },
+  {
+    "semantic": "SHAPEKEY_OFFSET",
+    "semantic_index": 0,
+    "format": "R32_UINT",
+    "stride": 0,
+    "offset": 0,
+    "name": "000003-cs-cb0=06450352-cs=9bf4420c82102011.buf"
+  },
+  {
+    "semantic": "SHAPEKEY_VERTEXID",
+    "semantic_index": 0,
+    "format": "R32_UINT",
+    "stride": 0,
+    "offset": 0,
+    "name": "000003-cs-t0=71c29d56-cs=9bf4420c82102011.buf"
+  },
+  {
+    "semantic": "SHAPEKEY_VERTEXOFFSET",
+    "semantic_index": 0,
+    "format": "R16G16B16_FLOAT",
+    "stride": 12,
+    "offset": 0,
+    "name": "000003-cs-t1=bae20e3e-cs=9bf4420c82102011.buf"
+  },
+  {
+    "semantic": "SHAPEKEY_OFFSET",
+    "semantic_index": 1,
+    "format": "R32_UINT",
+    "stride": 0,
+    "offset": 0,
+    "name": "000004-cs-cb0=06450352-cs=9bf4420c82102011.buf"
+  },
+  {
+    "semantic": "SHAPEKEY_VERTEXID",
+    "semantic_index": 1,
+    "format": "R32_UINT",
+    "stride": 0,
+    "offset": 0,
+    "name": "000004-cs-t0=71c29d56-cs=9bf4420c82102011.buf"
+  },
+  {
+    "semantic": "SHAPEKEY_VERTEXOFFSET",
+    "semantic_index": 1,
+    "format": "R16G16B16_FLOAT",
+    "stride": 12,
+    "offset": 0,
+    "name": "000004-cs-t1=bae20e3e-cs=9bf4420c82102011.buf"
+  },
+  {
+    "semantic": "BONEMATRIX",
+    "semantic_index": 0,
+    "format": "MATRIX3X4_FLOAT",
+    "stride": 0,
+    "offset": 0,
+    "name": "vs-cb4"
   }
 ]

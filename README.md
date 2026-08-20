@@ -15,6 +15,7 @@
   - **Mesh 模式**：手动添加属性条目，逐项指定文件、格式、步长、偏移后导入。
   - **FMT 模式**：加载 `.fmt` / 3dmigoto `txt` 文件，自动解析布局并搜索同前缀的 ib/vb 资源，语义自动猜测、可手动修正。
 - **完整属性支持**：位置、法线、切线、多套 UV（`TEXCOORD0-3`）、顶点色、骨骼权重（顶点组）、形态键（Shape Keys）。
+- **骨骼矩阵与自动骨架**：导入 `BONEMATRIX`（`MATRIX3X4_FLOAT` 3×4 蒙皮矩阵）后，自动创建 Armature——所有骨骼 rest 位于原点（无父子），姿态直接应用骨骼矩阵，结合顶点组权重即可正确蒙皮。
 - **形态键导入**：支持两种形态键数据来源（按偏移边界分组的 `SHAPEKEY_OFFSET/ID/OFFSET` 与逐顶点位移 `SHAPEKEY`），导入后命名为 `Deform N` 且数值归零，显示基础网格。
 - **资源自动发现**：根据文件名前缀自动匹配同一资源组的 ib/vb 文件，支持 WWMI 与 FrameAnalysis 两种命名风格。
 - **布局校验**：自动检测步长不一致、格式越界、布局不连续、语义冲突等常见配置错误，并在列表中高亮提示。
@@ -72,6 +73,7 @@
 | `SHAPEKEY_VERTEXID` | 形态键顶点 id 列表（`R32_UINT`） |
 | `SHAPEKEY_VERTEXOFFSET` | 形态键顶点位移向量列表（`R16G16B16_FLOAT`） |
 | `SHAPEKEY` | 形态键逐顶点位移（索引即 Deform 编号，如 `SHAPEKEY 23` = `Deform 23`） |
+| `BONEMATRIX` | 骨骼 3×4 矩阵（`MATRIX3X4_FLOAT`，索引即骨骼号，与 `BLENDINDICES` 对应） |
 | `SKIP` | 不导入该元素（仅 FMT 模式） |
 
 其中 `INDEX` 与 `POSITION` 为必需语义，缺失时导入会给出警告。
@@ -99,7 +101,7 @@
 - 分量类型：`FLOAT`、`UINT`、`SINT`、`UNORM`、`SNORM`
 - 位宽：8 / 16 / 32 位
 - 通道：`R`、`RG`、`RGB`、`RGBA`
-- 附加：`B8G8R8A8_UNORM`、`B8G8R8A8_SNORM`
+- 附加：`B8G8R8A8_UNORM`、`B8G8R8A8_SNORM`、`MATRIX3X4_FLOAT`（骨骼 3×4 矩阵，48 字节）
 - `UNORM` / `SNORM` 在导入时会自动归一化到 `[0,1]` / `[-1,1]`
 
 ## 资源命名约定

@@ -129,7 +129,7 @@ def build_object(name, faces, positions, normals=None, tangents=None, uvs=None,
                  colors=None, blend_indices=None, blend_weights=None,
                  shape_keys=None, shape_key_arrays=None, shape_key_offset=0,
                  flip_winding=True, flip_texcoord_v=True,
-                 scale=1.0, mirror_x=False):
+                 scale=1.0, mirror_x=False, conversion=None):
     """根据缓冲数据构建 Blender 网格对象
 
     faces:         (n, 3) 索引数组
@@ -148,6 +148,8 @@ def build_object(name, faces, positions, normals=None, tangents=None, uvs=None,
     shape_key_offset: 顶点压缩时移除的 v_min，用于把形态键顶点 id 映射到压缩后网格
     scale:         全局缩放系数（作用于顶点位置）
     mirror_x:      沿 X 轴镜像（同时翻转法线/切线 X 分量，并反转环绕方向）
+    conversion:    坐标轴转换矩阵（mathutils 4×4），作用于顶点/法线/切线/形态键位移，
+                   对象本身保持无变换
     """
     uvs = uvs or {}
     colors = colors or {}
@@ -176,6 +178,18 @@ def build_object(name, faces, positions, normals=None, tangents=None, uvs=None,
         if tangents is not None:
             tangents = numpy.ascontiguousarray(tangents[:, :3], dtype=numpy.float32)
             tangents[:, 0] *= -1
+    # 坐标轴转换（作用于数据本身，对象保持无变换）
+    if conversion is not None:
+        rot = numpy.array(conversion.to_3x3())
+        positions = positions @ rot.T
+        if normals is not None:
+            n = numpy.ascontiguousarray(normals, dtype=numpy.float32)
+            normals = numpy.concatenate(
+                [n[:, :3] @ rot.T, n[:, 3:]], axis=1) if n.shape[1] > 3 else n[:, :3] @ rot.T
+        if tangents is not None:
+            t = numpy.ascontiguousarray(tangents, dtype=numpy.float32)
+            tangents = numpy.concatenate(
+                [t[:, :3] @ rot.T, t[:, 3:]], axis=1) if t.shape[1] > 3 else t[:, :3] @ rot.T
     mesh.vertices.add(len(positions))
     mesh.vertices.foreach_set('co', positions.reshape(-1))
 
@@ -217,7 +231,8 @@ def build_object(name, faces, positions, normals=None, tangents=None, uvs=None,
     if shape_keys is not None or shape_key_arrays:
         _import_shape_keys(obj, positions, shape_keys,
                            shape_key_arrays=shape_key_arrays,
-                           offset=shape_key_offset, scale=scale, mirror_x=mirror_x)
+                           offset=shape_key_offset, scale=scale, mirror_x=mirror_x,
+                           conversion=conversion)
 
     # 切线存入自定义属性（Blender 无原生切线存储）
     if tangents is not None:
@@ -273,7 +288,7 @@ def _import_vertex_groups(obj, blend_indices, blend_weights):
 
 
 def _import_shape_keys(obj, positions, shape_keys, shape_key_arrays=None,
-                       offset=0, scale=1.0, mirror_x=False):
+                       offset=0, scale=1.0, mirror_x=False, conversion=None):
     """构建 Blender 形态键
 
     shape_keys:  [(offsets, vertex_ids, vertex_offsets), ...] 列表，
@@ -286,6 +301,8 @@ def _import_shape_keys(obj, positions, shape_keys, shape_key_arrays=None,
     """
     if not shape_keys and not shape_key_arrays:
         return
+
+    rot = numpy.array(conversion.to_3x3()) if conversion is not None else None
 
     basis = obj.shape_key_add(name='Basis', from_mix=False)
     basis_data = numpy.empty(len(positions) * 3, dtype=numpy.float32)
@@ -300,19 +317,24 @@ def _import_shape_keys(obj, positions, shape_keys, shape_key_arrays=None,
         key.data.foreach_set('co', data.reshape(-1))
         return key
 
+    def transform_vecs(vecs):
+        """位移向量应用与顶点相同的缩放/镜像/轴转换"""
+        vecs = numpy.ascontiguousarray(vecs, dtype=numpy.float32)
+        if scale != 1.0:
+            vecs = vecs * scale
+        if mirror_x:
+            vecs = vecs.copy()
+            vecs[:, 0] *= -1
+        if rot is not None:
+            vecs = vecs @ rot.T
+        return vecs
+
     # 形态键名称编号跨组全局累加（如索引 0 生成 Deform 0..126，索引 1 从 Deform 127 开始）
     deform_index = 0
     for offsets, vertex_ids, vertex_offsets in shape_keys or []:
         offsets = numpy.asarray(offsets, dtype=numpy.int64)
         vertex_ids = numpy.asarray(vertex_ids, dtype=numpy.int64) - offset
-        vertex_offsets = numpy.asarray(vertex_offsets, dtype=numpy.float32)
-
-        # 位移向量应用与顶点相同的缩放/镜像
-        if scale != 1.0:
-            vertex_offsets = vertex_offsets.copy() * scale
-        if mirror_x:
-            vertex_offsets = vertex_offsets.copy()
-            vertex_offsets[:, 0] *= -1
+        vertex_offsets = transform_vecs(vertex_offsets)
 
         count = len(offsets) - 1
         for i in range(count):
@@ -335,11 +357,76 @@ def _import_shape_keys(obj, positions, shape_keys, shape_key_arrays=None,
     # 逐顶点形态键：SHAPEKEY 索引即 Deform 编号
     if shape_key_arrays:
         for index in sorted(shape_key_arrays.keys()):
-            vecs = numpy.ascontiguousarray(
-                shape_key_arrays[index][:, :3], dtype=numpy.float32)
-            if scale != 1.0:
-                vecs = vecs * scale
-            if mirror_x:
-                vecs = vecs.copy()
-                vecs[:, 0] *= -1
+            vecs = transform_vecs(shape_key_arrays[index][:, :3])
             make_key(f'Deform {index}', vecs)
+
+
+def build_armature(name, matrices, scale=1.0, mirror_x=False, conversion=None,
+                   collection=None):
+    """创建骨架对象：骨骼 rest 全部位于原点（无父子），姿态应用骨骼矩阵
+
+    matrices: (n, 3, 4) 行主序 3×4 蒙皮矩阵（索引即骨骼号）
+    scale:    全局缩放，与网格顶点缩放一致（先作用于骨骼平移，再做轴相似变换）
+    mirror_x: 沿 X 轴镜像（与网格顶点镜像一致，骨骼矩阵做 X·M·X 相似变换）
+    conversion: 坐标轴转换矩阵（mathutils 4×4），骨骼矩阵做相似变换 C·M·C⁻¹，
+                与顶点/法线的轴转换保持一致，对象本身保持无变换
+    collection: 骨架对象链接到的集合（None = 当前场景集合）
+
+    原理（参考 3dmigoto 官方插件）：
+    骨骼沿 +Y（Blender 骨骼局部 Y 轴即 head→tail 方向）使 rest 矩阵_local = I，
+    无父级时蒙皮矩阵 = pose.matrix × rest_inv = matrix_basis，
+    因此把 matrix_basis 直接设为目标蒙皮矩阵即可与游戏蒙皮一致。
+    骨骼名称即矩阵下标，与顶点组名称对应。
+    """
+    import mathutils
+
+    arm_data = bpy.data.armatures.new(name)
+    arm_obj = bpy.data.objects.new(name, arm_data)
+
+    if collection is None:
+        collection = bpy.context.scene.collection
+    collection.objects.link(arm_obj)
+    arm_obj.select_set(True)
+    bpy.context.view_layer.objects.active = arm_obj
+
+    # 编辑模式创建骨骼：全部位于原点、无父级、沿 +Y 单位长度
+    # （Blender 骨骼局部 Y 轴沿骨骼方向，tail 沿 +Y 时 matrix_local = I）
+    bpy.ops.object.mode_set(mode='EDIT')
+    try:
+        for i in range(len(matrices)):
+            bone = arm_data.edit_bones.new(str(i))
+            bone.head = (0.0, 0.0, 0.0)
+            bone.tail = (0.0, 0.1, 0.0)
+    finally:
+        bpy.ops.object.mode_set(mode='OBJECT')
+
+    # 镜像矩阵（X 轴翻转，其逆等于自身）
+    mirror4 = None
+    if mirror_x:
+        mirror4 = mathutils.Matrix((
+            (-1.0, 0.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0, 0.0),
+            (0.0, 0.0, 1.0, 0.0),
+            (0.0, 0.0, 0.0, 1.0),
+        ))
+
+    # 姿态：零矩阵（未使用的骨骼池槽位）旋转退化，保持原点姿态即可
+    for i, M in enumerate(matrices):
+        R = M[:3, :3]
+        if numpy.linalg.norm(R) < 1e-4:
+            continue
+        T = M[:3, 3]
+        target = mathutils.Matrix((
+            (R[0, 0], R[0, 1], R[0, 2], T[0] * scale),
+            (R[1, 0], R[1, 1], R[1, 2], T[1] * scale),
+            (R[2, 0], R[2, 1], R[2, 2], T[2] * scale),
+            (0.0, 0.0, 0.0, 1.0),
+        ))
+        # 镜像相似变换（与顶点镜像顺序一致：缩放 -> 镜像 -> 轴转换）
+        if mirror4 is not None:
+            target = mirror4 @ target @ mirror4
+        if conversion is not None:
+            target = conversion @ target @ conversion.inverted()
+        arm_obj.pose.bones[str(i)].matrix_basis = target
+
+    return arm_obj

@@ -81,6 +81,12 @@ class BUFFERIO_PT_main(Panel):
             row.prop(scene, 'bufferio_axis_forward', text='前')
             row.prop(scene, 'bufferio_axis_up', text='上')
 
+        # 导入按钮统一放在面板最下方
+        if scene.bufferio_mode == 'MESH':
+            layout.operator('bufferio.import_mesh', icon='IMPORT')
+        else:
+            layout.operator('bufferio.import_fmt', icon='IMPORT')
+
     def draw_mesh_mode(self, layout, scene):
         # 保存/加载预设（不含文件路径，仅语义、索引、格式、步长、偏移）
         row = layout.row(align=True)
@@ -125,8 +131,6 @@ class BUFFERIO_PT_main(Panel):
                 box.prop(item, 'count')
                 box.prop(item, 'export_name')
 
-        layout.operator('bufferio.import_mesh', icon='IMPORT')
-
     def draw_fmt_mode(self, layout, scene):
         # 加载 FMT（点击后弹出文件选择）
         layout.operator('bufferio.load_fmt', icon='FILE_REFRESH')
@@ -170,8 +174,6 @@ class BUFFERIO_PT_main(Panel):
                 box.prop(item, 'stride')
                 box.prop(item, 'offset')
                 box.prop(item, 'count')
-
-        layout.operator('bufferio.import_fmt', icon='IMPORT')
 
 
 CLASSES = (
