@@ -17,13 +17,12 @@ class BUFFERIO_UL_attributes(UIList):
         # 校验状态图标：0 正常 / 1 红(ERROR) / 2 黄(QUESTION)
         icon = 'FAKE_USER_ON' if item.warning == 0 else ('ERROR' if item.warning == 1 else 'QUESTION')
         row.label(text='', icon=icon)
-        name = item.semantic
-        if item.semantic in INDEXED_SEMANTICS and item.semantic_index > 0:
-            name += str(item.semantic_index)
-        row.label(text=name)
+        # 名称（单击选中，双击编辑）
+        row.prop(item, 'export_name', text='', emboss=False)
         sub = row.row(align=True)
         sub.active = item.enabled
-        sub.prop(item, 'format', text='')
+        # 语义下拉，可直接切换
+        sub.prop(item, 'semantic', text='')
         row.label(text=Path(item.filepath).name if item.filepath else '<未指定文件>',
                   icon='FILE_BLANK')
 
@@ -37,7 +36,8 @@ class BUFFERIO_UL_elements(UIList):
         # 校验状态图标：0 正常 / 1 红(ERROR) / 2 黄(QUESTION)
         icon = 'FAKE_USER_ON' if item.warning == 0 else ('ERROR' if item.warning == 1 else 'QUESTION')
         row.label(text='', icon=icon)
-        row.label(text=item.label)
+        # 名称（单击选中，双击编辑）
+        row.prop(item, 'name', text='', emboss=False)
         sub = row.row(align=True)
         sub.active = item.enabled
         # 格式选择放在原始语义的左边（与下方属性栏共用）
@@ -88,11 +88,6 @@ class BUFFERIO_PT_main(Panel):
             layout.operator('bufferio.import_fmt', icon='IMPORT')
 
     def draw_mesh_mode(self, layout, scene):
-        # 保存/加载预设（不含文件路径，仅语义、索引、格式、步长、偏移）
-        row = layout.row(align=True)
-        row.operator('bufferio.save_mesh_preset', icon='EXPORT')
-        row.operator('bufferio.load_mesh_preset', icon='IMPORT')
-
         row = layout.row()
         row.template_list('BUFFERIO_UL_attributes', '', scene, 'bufferio_attributes',
                           scene, 'bufferio_attributes_index', rows=4)
@@ -102,6 +97,10 @@ class BUFFERIO_PT_main(Panel):
         col.separator()
         col.operator('bufferio.attribute_move', icon='TRIA_UP', text='').direction = 'UP'
         col.operator('bufferio.attribute_move', icon='TRIA_DOWN', text='').direction = 'DOWN'
+        # 保存/加载预设（不含文件路径，仅语义、索引、格式、步长、偏移）
+        col.separator()
+        col.operator('bufferio.save_mesh_preset', icon='EXPORT', text='')
+        col.operator('bufferio.load_mesh_preset', icon='IMPORT', text='')
         col.separator()
         col.operator('bufferio.fa_paths', icon='FILE_FOLDER', text='')
         col.separator()
@@ -123,22 +122,14 @@ class BUFFERIO_PT_main(Panel):
                 box.prop(item, 'filepath')
                 if item.semantic == 'INDEX':
                     box.prop(item, 'ib_txt')
-                    box.prop(item, 'first_vertex')
-                    box.prop(item, 'vertex_count')
+                    box.prop(item, 'first_index')
+                    box.prop(item, 'index_count')
                 box.prop(item, 'format')
                 box.prop(item, 'stride')
                 box.prop(item, 'offset')
                 box.prop(item, 'count')
-                box.prop(item, 'export_name')
 
     def draw_fmt_mode(self, layout, scene):
-        # 加载 FMT（点击后弹出文件选择）
-        layout.operator('bufferio.load_fmt', icon='FILE_REFRESH')
-        # 保存/加载语义映射（SemanticName SemanticIndex -> 属性，如 ATTRIBUTE 0 POSITION）
-        row = layout.row(align=True)
-        row.operator('bufferio.save_semantics', icon='EXPORT')
-        row.operator('bufferio.load_semantics', icon='IMPORT')
-
         row = layout.row()
         row.template_list('BUFFERIO_UL_elements', '', scene, 'bufferio_elements',
                           scene, 'bufferio_elements_index', rows=6)
@@ -148,6 +139,12 @@ class BUFFERIO_PT_main(Panel):
         col.separator()
         col.operator('bufferio.element_move', icon='TRIA_UP', text='').direction = 'UP'
         col.operator('bufferio.element_move', icon='TRIA_DOWN', text='').direction = 'DOWN'
+        # 保存/加载元素预设（不含文件路径）
+        col.separator()
+        col.operator('bufferio.save_semantics', icon='EXPORT', text='')
+        col.operator('bufferio.load_semantics', icon='IMPORT', text='')
+        col.separator()
+        col.operator('bufferio.load_fmt', icon='FILE_FOLDER', text='')
         col.separator()
         col.operator('bufferio.validate_all', icon='ZOOM_ALL', text='')
 
@@ -168,8 +165,8 @@ class BUFFERIO_PT_main(Panel):
                 box.prop(item, 'filepath')
                 if item.semantic == 'INDEX':
                     box.prop(item, 'ib_txt')
-                    box.prop(item, 'first_vertex')
-                    box.prop(item, 'vertex_count')
+                    box.prop(item, 'first_index')
+                    box.prop(item, 'index_count')
                 box.prop(item, 'format')
                 box.prop(item, 'stride')
                 box.prop(item, 'offset')

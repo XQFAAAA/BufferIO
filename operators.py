@@ -1,6 +1,7 @@
 """BufferIO 操作符：列表增删移动、校验、预设/语义、资源发现与导入。"""
 
 import json
+import re
 from pathlib import Path
 
 import bpy
@@ -12,7 +13,6 @@ from . import fmt_parser
 from .constants import (
     ATTRIBUTE_SEMANTIC_ITEMS,
     ELEMENT_SEMANTIC_ITEMS,
-    INDEXED_SEMANTICS,
     MESH_PRESETS_DIR,
     SEMANTICS_DIR,
     SEMANTIC_GUESS,
@@ -24,7 +24,7 @@ from .core import (
     collect_vertex_arrays,
     validate_entries,
 )
-from .properties import _assign_id
+from .properties import _assign_id, _auto_export_name
 
 
 class BUFFERIO_OT_attribute_add(bpy.types.Operator):
@@ -85,7 +85,7 @@ class BUFFERIO_OT_element_add(bpy.types.Operator):
         item = elems.add()
         _assign_id(elems, item)
         item.enabled = True
-        item.label = '自定义元素'
+        item.name = '自定义元素'
         context.scene.bufferio_elements_index = len(elems) - 1
         return {'FINISHED'}
 
@@ -147,12 +147,12 @@ class BUFFERIO_OT_validate_all(bpy.types.Operator):
 
 
 class BUFFERIO_OT_save_semantics(bpy.types.Operator):
-    """把当前元素的语义映射（SemanticName SemanticIndex -> 属性）保存到插件本地"""
+    """把当前 FMT 模式元素配置保存为预设（不含文件路径）"""
     bl_idname = 'bufferio.save_semantics'
-    bl_label = 'Save Semantics'
+    bl_label = '保存预设'
     bl_options = {'REGISTER'}
 
-    name: StringProperty(name='方案名称', default='')
+    name: StringProperty(name='预设名称', default='')
 
     def invoke(self, context, event):
         return context.window_manager.invoke_props_dialog(self)
@@ -165,34 +165,41 @@ class BUFFERIO_OT_save_semantics(bpy.types.Operator):
     def execute(self, context):
         name = self.name.strip()
         if not name:
-            self.report({'ERROR'}, '请输入方案名称')
+            self.report({'ERROR'}, '请输入预设名称')
             return {'CANCELLED'}
-        mapping = {}
+        preset = []
         for e in context.scene.bufferio_elements:
-            key = f'{e.semantic_name} {e.semantic_index}'
-            # 值格式：带索引的语义保存为 "TEXCOORD 0" 形式
-            if e.index > 0 or e.semantic in INDEXED_SEMANTICS:
-                mapping[key] = f'{e.semantic} {e.index}'
-            else:
-                mapping[key] = e.semantic
+            preset.append({
+                'name': e.name,
+                'enabled': e.enabled,
+                'semantic_name': e.semantic_name,
+                'semantic': e.semantic,
+                'semantic_index': e.semantic_index,
+                'index': e.index,
+                'format': e.format,
+                'input_slot': e.input_slot,
+                'offset': e.offset,
+                'stride': e.stride,
+                'count': e.count,
+            })
         try:
             SEMANTICS_DIR.mkdir(parents=True, exist_ok=True)
             with open(SEMANTICS_DIR / f'{name}.json', 'w', encoding='utf-8') as f:
-                json.dump(mapping, f, ensure_ascii=False, indent=2)
+                json.dump(preset, f, ensure_ascii=False, indent=2)
         except Exception as exc:
             self.report({'ERROR'}, f'保存失败: {exc}')
             return {'CANCELLED'}
-        self.report({'INFO'}, f'已保存 {len(mapping)} 条语义映射：{name}')
+        self.report({'INFO'}, f'已保存 {len(preset)} 个元素预设：{name}')
         return {'FINISHED'}
 
 
 class BUFFERIO_OT_load_semantics(bpy.types.Operator):
-    """从插件本地加载语义映射并应用到当前元素列表"""
+    """从插件本地加载 FMT 元素预设并重建元素列表（不含文件路径）"""
     bl_idname = 'bufferio.load_semantics'
-    bl_label = 'Load Semantics'
+    bl_label = '加载预设'
     bl_options = {'REGISTER', 'UNDO'}
 
-    scheme: EnumProperty(name='方案', items=_semantics_items)
+    scheme: EnumProperty(name='预设', items=_semantics_items)
 
     def invoke(self, context, event):
         return context.window_manager.invoke_props_dialog(self)
@@ -203,33 +210,45 @@ class BUFFERIO_OT_load_semantics(bpy.types.Operator):
 
     def execute(self, context):
         if not self.scheme:
-            self.report({'ERROR'}, '没有可用的语义方案')
+            self.report({'ERROR'}, '没有可用的预设')
             return {'CANCELLED'}
         try:
             with open(SEMANTICS_DIR / f'{self.scheme}.json', 'r', encoding='utf-8') as f:
-                mapping = json.load(f)
+                preset = json.load(f)
         except Exception as exc:
             self.report({'ERROR'}, f'读取失败: {exc}')
             return {'CANCELLED'}
+        if not isinstance(preset, list):
+            self.report({'ERROR'}, f'预设格式不兼容（旧版语义方案？）：{self.scheme}')
+            return {'CANCELLED'}
 
-        valid = {i[0] for i in ELEMENT_SEMANTIC_ITEMS}
-        applied = 0
-        for e in context.scene.bufferio_elements:
-            key = f'{e.semantic_name} {e.semantic_index}'
-            value = mapping.get(key)
-            if not value:
-                continue
-            # 值格式 "TEXCOORD 0"：空格后为索引；纯语义名则索引保持 0
-            parts = value.split(' ')
-            if parts[0] not in valid:
-                continue
-            e.semantic = parts[0]
-            if len(parts) > 1 and parts[1].isdigit():
-                e.index = int(parts[1])
-            else:
-                e.index = 0
-            applied += 1
-        self.report({'INFO'}, f'已应用 {applied} 条语义映射')
+        valid_sem = {i[0] for i in ELEMENT_SEMANTIC_ITEMS}
+        valid_fmt = {i[0] for i in dxgi.format_enum_items()}
+        elems = context.scene.bufferio_elements
+        # 保留现有文件路径，加载预设后按索引恢复（预设本身不含路径）
+        old_paths = [(e.filepath, e.ib_txt) for e in elems]
+        elems.clear()
+        for i, d in enumerate(preset):
+            e = elems.add()
+            _assign_id(elems, e)
+            e.enabled = bool(d.get('enabled', True))
+            e.name = d.get('name', d.get('label', ''))
+            e.semantic_name = d.get('semantic_name', '')
+            if d.get('semantic') in valid_sem:
+                e.semantic = d['semantic']
+            e.semantic_index = int(d.get('semantic_index', 0))
+            e.index = int(d.get('index', 0))
+            if d.get('format') in valid_fmt:
+                e.format = d['format']
+            e.input_slot = int(d.get('input_slot', 0))
+            e.offset = int(d.get('offset', 0))
+            e.stride = int(d.get('stride', 0))
+            e.count = int(d.get('count', 0))
+            if i < len(old_paths):
+                e.filepath = old_paths[i][0]
+                e.ib_txt = old_paths[i][1]
+        context.scene.bufferio_elements_index = 0
+        self.report({'INFO'}, f'已加载 {len(elems)} 个元素预设：{self.scheme}')
         return {'FINISHED'}
 
 
@@ -263,6 +282,7 @@ class BUFFERIO_OT_save_mesh_preset(bpy.types.Operator):
                 'format': a.format,
                 'stride': a.stride,
                 'offset': a.offset,
+                'count': a.count,
                 'name': a.export_name,
             })
         try:
@@ -305,10 +325,11 @@ class BUFFERIO_OT_load_mesh_preset(bpy.types.Operator):
         valid_sem = {i[0] for i in ATTRIBUTE_SEMANTIC_ITEMS}
         valid_fmt = {i[0] for i in dxgi.format_enum_items()}
         attrs = context.scene.bufferio_attributes
+        # 保留现有文件路径，加载预设后按索引恢复（预设本身不含路径）
+        old_paths = [(a.filepath, a.ib_txt) for a in attrs]
+        items = [d for d in preset if d.get('semantic') in valid_sem]
         attrs.clear()
-        for d in preset:
-            if d.get('semantic') not in valid_sem:
-                continue
+        for i, d in enumerate(items):
             a = attrs.add()
             _assign_id(attrs, a)
             a.enabled = True
@@ -318,10 +339,81 @@ class BUFFERIO_OT_load_mesh_preset(bpy.types.Operator):
                 a.format = d['format']
             a.stride = d.get('stride', 0)
             a.offset = d.get('offset', 0)
-            a.export_name = d.get('name', d.get('export_name', ''))
+            a.count = int(d.get('count', 0))
+            if i < len(old_paths):
+                a.filepath = old_paths[i][0]
+                a.ib_txt = old_paths[i][1]
+            # 路径恢复会触发 filepath 的 update（重新推导名称），
+            # 预设存在名称时用预设名称覆盖；预设无名称则保持（不清空）
+            preset_name = d.get('name', d.get('export_name', ''))
+            if preset_name:
+                a.export_name = preset_name
         context.scene.bufferio_attributes_index = 0
         self.report({'INFO'}, f'已加载 {len(attrs)} 项预设：{self.scheme}')
         return {'FINISHED'}
+
+
+def wuwa_shapekey_map(directory, prefix, report=None):
+    """wuwa 形态键路径映射：
+
+    1. 取同前缀 vb6 的 hash（如 000017-vb6=3c20751d-... -> 3c20751d）；
+    2. 搜索同时含该 hash 与形态键 CS hash 的文件（如 000003-u0=3c20751d-cs=...），
+       得到形态键 draw call id 列表；
+    3. 按 draw call id 排序，返回 {slot: {语义: 文件路径}}（最多两份）。
+
+    report 为可选回调（如 operator.report），用于输出警告/信息；返回 None 表示未找到。
+    """
+    cs_hash = '9bf4420c82102011'  # 鸣潮形态键 compute shader hash（固定）
+
+    def warn(msg):
+        if report is not None:
+            report({'WARNING'}, msg)
+
+    # 1. 同前缀 vb6 -> hash
+    vb6_matches = sorted(directory.glob(f'{prefix}-vb6=*.buf'))
+    if not vb6_matches:
+        warn('wuwa：未找到同前缀 vb6 文件')
+        return None
+    m = re.search(r'-vb6=([0-9a-f]+)-', vb6_matches[0].name)
+    if not m:
+        warn('wuwa：无法从 vb6 文件名提取 hash')
+        return None
+    vb6_hash = m.group(1)
+
+    # 2. 定位形态键 draw call id
+    draw_ids = set()
+    for f in directory.glob('*-cs=*.buf'):
+        if vb6_hash in f.name and cs_hash in f.name:
+            m2 = re.match(r'^(\d+)-', f.name)
+            if m2:
+                draw_ids.add(m2.group(1))
+    if not draw_ids:
+        warn(f'wuwa：未找到 hash {vb6_hash} 对应的形态键 CS 调用')
+        return None
+
+    # 3. 每个 draw call 的 cs-cb0/cs-t0/cs-t1 -> 语义
+    sem_map = {
+        'cs-cb0': 'SHAPEKEY_OFFSET',
+        'cs-t0': 'SHAPEKEY_VERTEXID',
+        'cs-t1': 'SHAPEKEY_VERTEXOFFSET',
+    }
+    result = {}
+    for slot, draw_id in enumerate(sorted(draw_ids)):
+        if slot >= 2:
+            break  # 目前只支持两份形态键
+        entry = {}
+        for tag, semantic in sem_map.items():
+            matches = sorted(directory.glob(f'{draw_id}-{tag}=*.buf'))
+            if matches:
+                entry[semantic] = matches[0]
+        if entry:
+            result[slot] = entry
+    if not result:
+        warn('wuwa：未找到形态键 CS 数据文件')
+        return None
+    if report is not None:
+        report({'INFO'}, f'wuwa：vb6 hash {vb6_hash}，形态键 draw {sorted(draw_ids)}')
+    return result
 
 
 class BUFFERIO_OT_fa_paths(bpy.types.Operator):
@@ -332,6 +424,14 @@ class BUFFERIO_OT_fa_paths(bpy.types.Operator):
 
     filepath: StringProperty(subtype='FILE_PATH')
     filter_glob: StringProperty(default='*.buf;*.txt', options={'HIDDEN'})
+    shapekey_mode: EnumProperty(
+        name='形态键搜索',
+        items=[
+            ('NONE', '无', '不进行形态键搜索'),
+            ('WUWA', 'wuwa', '鸣潮：通过同前缀 vb6 定位形态键 CS 调用，并填入 SHAPEKEY 条目'),
+        ],
+        default='NONE',
+    )
 
     def invoke(self, context, event):
         context.window_manager.fileselect_add(self)
@@ -377,8 +477,8 @@ class BUFFERIO_OT_fa_paths(bpy.types.Operator):
                     a.ib_txt = str(txt)
                     try:
                         fmt = fmt_parser.parse_fmt_file(txt)
-                        a.first_vertex = fmt.first_index
-                        a.vertex_count = fmt.index_count
+                        a.first_index = fmt.first_index
+                        a.index_count = fmt.index_count
                     except Exception:
                         pass
             else:
@@ -386,8 +486,29 @@ class BUFFERIO_OT_fa_paths(bpy.types.Operator):
                                     key=lambda p: (p.suffix.lower() != '.buf', p.name))
                 a.filepath = str(candidates[0])
             applied += 1
+
+        # wuwa 形态键搜索（额外的 SHAPEKEY 条目填充）
+        extra = 0
+        if self.shapekey_mode == 'WUWA':
+            mapping = wuwa_shapekey_map(path.parent, prefix, self.report)
+            if mapping:
+                attrs = context.scene.bufferio_attributes
+                for slot, sem_map in mapping.items():
+                    for semantic, p in sem_map.items():
+                        for a in attrs:
+                            if (a.enabled and a.semantic == semantic
+                                    and a.semantic_index == slot):
+                                a.filepath = str(p)
+                                # 名称显式从路径提取（如 cs-cb0），提取不到则不修改
+                                auto = _auto_export_name(str(p))
+                                if auto:
+                                    a.export_name = auto
+                                extra += 1
+                                break
+
         self.report({'INFO'},
-                    f'前缀 {prefix}：找到 {len(found)} 类资源，已填入 {applied} 项路径')
+                    f'前缀 {prefix}：找到 {len(found)} 类资源，已填入 {applied} 项路径'
+                    + (f'，wuwa 形态键 {extra} 项' if extra else ''))
         return {'FINISHED'}
 
 
@@ -398,6 +519,19 @@ class BUFFERIO_OT_load_fmt(bpy.types.Operator):
 
     filepath: StringProperty(subtype='FILE_PATH')
     filter_glob: StringProperty(default='*.fmt;*.txt', options={'HIDDEN'})
+    shapekey_mode: EnumProperty(
+        name='形态键搜索',
+        items=[
+            ('NONE', '无', '不进行形态键搜索'),
+            ('WUWA', 'wuwa', '鸣潮：通过同前缀 vb6 定位形态键 CS 调用，并自动添加 SHAPEKEY 元素'),
+        ],
+        default='NONE',
+    )
+    bone_matrix_tag: StringProperty(
+        name='骨骼矩阵',
+        description='填写资源 tag（如 vs-cb4），加载后自动搜索同 draw call 的骨骼矩阵并添加 BONEMATRIX 元素',
+        default='',
+    )
 
     def invoke(self, context, event):
         context.window_manager.fileselect_add(self)
@@ -478,6 +612,66 @@ class BUFFERIO_OT_load_fmt(bpy.types.Operator):
         result = validate_entries(scene.bufferio_elements)
         if result['missing']:
             self.report({'WARNING'}, f'缺少必需语义：{", ".join(result["missing"])}')
+
+        # wuwa 形态键搜索：自动添加并填入 SHAPEKEY 元素
+        if self.shapekey_mode == 'WUWA':
+            dash = fmt_path.name.find('-')
+            if dash <= 0:
+                self.report({'WARNING'}, 'wuwa：无法从 FMT 文件名识别 FrameAnalysis 前缀')
+            else:
+                mapping = wuwa_shapekey_map(fmt_path.parent, fmt_path.name[:dash],
+                                            self.report)
+                if mapping:
+                    # 形态键数据默认格式（可手动调整）
+                    default_format = {
+                        'SHAPEKEY_OFFSET': 'R32_UINT',
+                        'SHAPEKEY_VERTEXID': 'R32_UINT',
+                        'SHAPEKEY_VERTEXOFFSET': 'R16G16B16_FLOAT',
+                    }
+                    added = 0
+                    for slot in sorted(mapping):
+                        for semantic, p in mapping[slot].items():
+                            item = scene.bufferio_elements.add()
+                            _assign_id(scene.bufferio_elements, item)
+                            item.enabled = True
+                            item.semantic_name = semantic
+                            item.semantic = semantic
+                            item.semantic_index = slot
+                            item.index = slot
+                            if default_format.get(semantic) in dxgi.SUPPORTED_FORMATS:
+                                item.format = default_format[semantic]
+                            item.name = f'{semantic} {slot}'
+                            item.filepath = str(p)
+                            added += 1
+                    self.report({'INFO'}, f'wuwa 形态键：已添加 {added} 个元素')
+
+        # 骨骼矩阵：填写 tag（如 vs-cb4）后自动查找同 draw call 的骨骼矩阵
+        tag = self.bone_matrix_tag.strip()
+        if tag:
+            dash = fmt_path.name.find('-')
+            if dash <= 0:
+                self.report({'WARNING'}, '无法从 FMT 文件名识别 FrameAnalysis 前缀')
+            else:
+                prefix = fmt_path.name[:dash]
+                matches = sorted(fmt_path.parent.glob(f'{prefix}-{tag}=*.buf'))
+                if not matches:
+                    self.report({'WARNING'}, f'未找到骨骼矩阵：{prefix}-{tag}=*.buf')
+                else:
+                    item = scene.bufferio_elements.add()
+                    _assign_id(scene.bufferio_elements, item)
+                    item.enabled = True
+                    item.semantic_name = 'BONEMATRIX'
+                    item.semantic = 'BONEMATRIX'
+                    item.index = 0
+                    if 'MATRIX3X4_FLOAT' in dxgi.SUPPORTED_FORMATS:
+                        item.format = 'MATRIX3X4_FLOAT'
+                    item.stride = 0
+                    item.offset = 0
+                    item.filepath = str(matches[0])
+                    auto = _auto_export_name(str(matches[0]))
+                    item.name = auto if auto else tag
+                    self.report({'INFO'}, f'骨骼矩阵：{matches[0].name}')
+
         self.report({'INFO'}, info)
         return {'FINISHED'}
 
@@ -486,8 +680,8 @@ class BUFFERIO_OT_load_fmt(bpy.types.Operator):
         item = scene.bufferio_elements.add()
         _assign_id(scene.bufferio_elements, item)
         item.enabled = element.is_per_vertex
-        # 语义名/索引由列表行内与属性面板显示，label 只保留缓冲槽位/偏移
-        item.label = f'vb{element.input_slot} +{element.byte_offset}'
+        # 语义名/索引由列表行内与属性面板显示，name 只保留缓冲槽位/偏移
+        item.name = f'vb{element.input_slot} +{element.byte_offset}'
         item.semantic_name = element.semantic_name
         item.semantic = SEMANTIC_GUESS.get(element.semantic_name, 'SKIP')
         item.semantic_index = element.semantic_index
@@ -520,14 +714,14 @@ class BUFFERIO_OT_load_fmt(bpy.types.Operator):
         item.offset = byte_offset
         item.stride = 0  # 索引为紧凑数据
         item.filepath = filepath
-        item.label = f'IB ({Path(filepath).name})'
-        # 从 ib txt 头部填充 first vertex / vertex count，并保留 txt 作为兜底
+        item.name = 'ib'
+        # 从 ib txt 头部填充 first index / index count，并保留 txt 作为兜底
         if ib_txt and Path(ib_txt).is_file():
             item.ib_txt = ib_txt
             try:
                 fmt = fmt_parser.parse_fmt_file(Path(ib_txt))
-                item.first_vertex = fmt.first_index
-                item.vertex_count = fmt.index_count
+                item.first_index = fmt.first_index
+                item.index_count = fmt.index_count
             except Exception:
                 pass
         return item

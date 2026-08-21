@@ -133,10 +133,10 @@ def _read_index_entry(entry, filepath):
     """读取 INDEX 项的面数据。
 
     优先级：文件路径+first/count -> 文件路径（自动分辨类型）-> ib txt。
-    first_vertex 为起始偏移，vertex_count 为限制数量（0 = 不限制）。
+    first_index 为起始偏移，index_count 为限制数量（0 = 不限制）。
     """
-    first = getattr(entry, 'first_vertex', 0)
-    count = getattr(entry, 'vertex_count', 0)
+    first = getattr(entry, 'first_index', 0)
+    count = getattr(entry, 'index_count', 0)
     limit = getattr(entry, 'count', 0)
     # 优先级1：文件路径 + first/count（设了偏移或数量限制）
     if filepath and (first > 0 or count > 0):

@@ -17,19 +17,20 @@ from .constants import (
 
 
 def _auto_export_name(filepath):
-    """从 3dmigoto FrameAnalysis 文件名推导导出名称（如 vb0 / vs-cb4）
+    """从 3dmigoto FrameAnalysis 文件名推导导出名称（如 vb0 / vs-cb4 / cs-cb0）
 
-    文件名形如 `000056-vb0=15fb50a9-vs=...buf` 或
-    `000056-vs-cb4=f02baf77-vs=...buf`，提取 `-名称=hash-vs=` 中的名称；
-    匹配不到时使用文件名本身。
+    文件名形如 `000056-vb0=15fb50a9-vs=...buf`、
+    `000056-vs-cb4=f02baf77-vs=...buf` 或
+    `000003-cs-cb0=06450352-cs=...buf`，
+    提取 draw id 后的第一个 `-名称=hash-` 段；匹配不到返回空字符串。
     """
     if not filepath:
         return ''
     name = Path(filepath).name
-    m = re.search(r'-([A-Za-z0-9][A-Za-z0-9-]*)=[0-9a-fA-F]+(?=-vs=)', name)
+    m = re.match(r'^\d+-([A-Za-z0-9][A-Za-z0-9-]*)=[0-9a-fA-F]+-', name)
     if m:
         return m.group(1)
-    return name
+    return ''
 
 
 def _parse_ib_header(filepath):
@@ -46,21 +47,26 @@ def _parse_ib_header(filepath):
 def _export_name_update(self, context):
     """导出名称被清空（如右键重置默认值）时从文件路径重新推导"""
     if not self.export_name and self.filepath:
-        self.export_name = _auto_export_name(self.filepath)
+        auto = _auto_export_name(self.filepath)
+        if auto:
+            self.export_name = auto
 
 
 def _filepath_export_name_update(self, context):
     """选择/修改文件路径后自动设置一次导出名称，并解析 INDEX txt 头部"""
-    self.export_name = _auto_export_name(self.filepath)
+    # 从路径提取不到名称时不修改已有名称
+    auto = _auto_export_name(self.filepath)
+    if auto:
+        self.export_name = auto
     if getattr(self, 'semantic', None) == 'INDEX' and self.filepath \
             and Path(self.filepath).suffix.lower() == '.txt':
         result = _parse_ib_header(self.filepath)
         if result is not None:
-            self.first_vertex, self.vertex_count = result
+            self.first_index, self.index_count = result
 
 
 def _index_path_update(self, context):
-    """INDEX 项选择 txt 路径后自动解析头部，填入 first vertex / vertex count"""
+    """INDEX 项选择 txt 路径后自动解析头部，填入 first index / index count"""
     if getattr(self, 'semantic', None) != 'INDEX':
         return
     fp = self.filepath or getattr(self, 'source_file', '')
@@ -68,14 +74,14 @@ def _index_path_update(self, context):
         return
     result = _parse_ib_header(fp)
     if result is not None:
-        self.first_vertex, self.vertex_count = result
+        self.first_index, self.index_count = result
 
 
 def _ib_txt_update(self, context):
-    """选择 IB txt 路径后自动解析头部，填入 first vertex / vertex count"""
+    """选择 IB txt 路径后自动解析头部，填入 first index / index count"""
     result = _parse_ib_header(self.ib_txt)
     if result is not None:
-        self.first_vertex, self.vertex_count = result
+        self.first_index, self.index_count = result
 
 
 class BufferIOAttribute(bpy.types.PropertyGroup):
@@ -94,11 +100,11 @@ class BufferIOAttribute(bpy.types.PropertyGroup):
     ib_txt: StringProperty(name='IB txt', subtype='FILE_PATH',
                            update=_ib_txt_update,
                            description='3dmigoto FrameAnalysis 的 ib txt（仅面索引）。优先级最低：无文件路径或未设 first/count 时使用')
-    # INDEX 项的 first vertex / vertex count，默认 0 表示不启用偏移/限制
-    first_vertex: IntProperty(name='first vertex', default=0, min=0,
-                              description='首个顶点/索引偏移；选择 txt 路径后自动从头部填入，可手动修改')
-    vertex_count: IntProperty(name='vertex count', default=0, min=0,
-                              description='顶点/索引数量；0 = 不限制，选择 txt 路径后自动从头部填入，可手动修改')
+    # INDEX 项的 first index / index count，默认 0 表示不启用偏移/限制
+    first_index: IntProperty(name='first index', default=0, min=0,
+                             description='首个索引偏移；选择 txt 路径后自动从头部填入，可手动修改')
+    index_count: IntProperty(name='index count', default=0, min=0,
+                             description='索引数量；0 = 不限制，选择 txt 路径后自动从头部填入，可手动修改')
     count: IntProperty(name='数量', default=0, min=0,
                        description='读取元素数量；0 = 不限制（缓冲末尾可能存在无效数据，可限制只读前 N 个）')
     export_name: StringProperty(name='名称', update=_export_name_update,
@@ -117,7 +123,7 @@ class BufferIOElement(bpy.types.PropertyGroup):
     enabled: BoolProperty(name='启用', default=True)
     warning: IntProperty(name='警告', default=0, min=0, max=2,
                          description='0 正常 / 1 红色（步长不一致或越界）/ 2 黄色（字节总和不等于步长）')
-    label: StringProperty(name='元素')
+    name: StringProperty(name='名称')
     semantic_name: StringProperty(name='语义名',
                                   description='原始语义名（如 POSITION / TANGENT）')
     semantic: EnumProperty(name='属性', items=ELEMENT_SEMANTIC_ITEMS, default='SKIP')
@@ -132,11 +138,11 @@ class BufferIOElement(bpy.types.PropertyGroup):
     ib_txt: StringProperty(name='IB txt', subtype='FILE_PATH',
                            update=_ib_txt_update,
                            description='3dmigoto FrameAnalysis 的 ib txt（仅面索引）。优先级最低：无文件路径或未设 first/count 时使用')
-    # INDEX 项的 first vertex / vertex count，默认 0 表示不启用偏移/限制
-    first_vertex: IntProperty(name='first vertex', default=0, min=0,
-                              description='首个顶点/索引偏移；选择 txt 路径后自动从头部填入，可手动修改')
-    vertex_count: IntProperty(name='vertex count', default=0, min=0,
-                              description='顶点/索引数量；0 = 不限制，选择 txt 路径后自动从头部填入，可手动修改')
+    # INDEX 项的 first index / index count，默认 0 表示不启用偏移/限制
+    first_index: IntProperty(name='first index', default=0, min=0,
+                             description='首个索引偏移；选择 txt 路径后自动从头部填入，可手动修改')
+    index_count: IntProperty(name='index count', default=0, min=0,
+                             description='索引数量；0 = 不限制，选择 txt 路径后自动从头部填入，可手动修改')
     count: IntProperty(name='数量', default=0, min=0,
                        description='读取元素数量；0 = 不限制（缓冲末尾可能存在无效数据，可限制只读前 N 个）')
     format: EnumProperty(name='格式', items=dxgi.format_enum_items(), default='R32G32B32_FLOAT')
