@@ -35,7 +35,7 @@ def read_buffer(filepath, format_name, stride=0, offset=0, elem_offset=0, limit=
     if limit > 0:
         count = min(count, limit)
 
-    if fmt.num_values > 1:
+    if fmt.num_values > 1 and not fmt.packed:
         field_type = (fmt.numpy_type, fmt.num_values)
     else:
         field_type = fmt.numpy_type
@@ -48,6 +48,8 @@ def read_buffer(filepath, format_name, stride=0, offset=0, elem_offset=0, limit=
 
     # numpy.frombuffer 返回只读数组，后续可能做原地变换（缩放/镜像），需复制为可写
     array = numpy.array(numpy.frombuffer(data, dtype=dtype, count=count, offset=offset)['field'], copy=True)
+    if fmt.packed:
+        array = fmt.unpack_packed(array)
     return array, fmt
 
 

@@ -24,7 +24,7 @@ from bpy.props import (
 
 from .constants import AXIS_ITEMS
 from .operators import CLASSES as OPERATOR_CLASSES
-from .properties import BufferIOAttribute, BufferIOElement
+from .properties import BufferIOElement
 from .ui import CLASSES as UI_CLASSES
 
 bl_info = {
@@ -39,7 +39,6 @@ bl_info = {
 
 # 注册顺序：PropertyGroup -> UIList/Operator -> Panel（依赖其类型）
 CLASSES = (
-    BufferIOAttribute,
     BufferIOElement,
     *UI_CLASSES,
     *OPERATOR_CLASSES,
@@ -47,16 +46,6 @@ CLASSES = (
 
 # 需要在 Scene 上注册的属性（unregister 时按此顺序清理）
 SCENE_PROPERTIES = (
-    ('bufferio_mode', EnumProperty, {
-        'name': '模式',
-        'items': [
-            ('MESH', 'Mesh', '按模型属性逐项指定文件、格式、步长、偏移导入'),
-            ('FMT', 'FMT', '从 fmt / 3dmigoto txt 文件导入，自动搜索同前缀资源'),
-        ],
-        'default': 'FMT',
-    }),
-    ('bufferio_attributes', CollectionProperty, {'type': BufferIOAttribute}),
-    ('bufferio_attributes_index', IntProperty, {'default': 0}),
     ('bufferio_elements', CollectionProperty, {'type': BufferIOElement}),
     ('bufferio_elements_index', IntProperty, {'default': 0}),
     ('bufferio_fmt_path', StringProperty, {

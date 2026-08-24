@@ -138,11 +138,13 @@ def _read_index_entry(entry, filepath):
     first = getattr(entry, 'first_index', 0)
     count = getattr(entry, 'index_count', 0)
     limit = getattr(entry, 'count', 0)
+    # 数据在缓冲文件中的起始字节偏移；旧数据没有 byte_offset 时回退到 offset
+    file_offset = getattr(entry, 'byte_offset', 0) or getattr(entry, 'offset', 0)
     # 优先级1：文件路径 + first/count（设了偏移或数量限制）
     if filepath and (first > 0 or count > 0):
         return buffer_io.read_indices(
             filepath, entry.format,
-            offset=getattr(entry, 'offset', 0),
+            offset=file_offset,
             first=first, count=count, limit=limit)
     # 优先级2：仅有文件路径，自动分辨类型
     if filepath:
@@ -151,7 +153,7 @@ def _read_index_entry(entry, filepath):
             return buffer_io.read_indices_from_ib_txt(filepath)
         # buf：offset 为文件起始字节偏移，平铺读取
         return buffer_io.read_indices(
-            filepath, entry.format, offset=getattr(entry, 'offset', 0), limit=limit)
+            filepath, entry.format, offset=file_offset, limit=limit)
     # 优先级3：仅 ib txt 路径
     if getattr(entry, 'ib_txt', ''):
         ib_txt = entry.ib_txt
@@ -163,11 +165,11 @@ def _read_index_entry(entry, filepath):
 
 def _read_vertex_entry(entry, filepath):
     """读取顶点属性条目数组，返回 (array, fmt)"""
-    # 顶点属性：offset / byte_offset 均为元素在步长内的字节偏移
-    elem_offset = getattr(entry, 'byte_offset', getattr(entry, 'offset', 0))
+    # offset：元素在步长内的字节偏移；byte_offset：数据在缓冲文件中的起始字节偏移
+    elem_offset = getattr(entry, 'offset', 0)
     return buffer_io.read_buffer(
         filepath, entry.format, stride=entry.stride,
-        offset=0, elem_offset=elem_offset,
+        offset=getattr(entry, 'byte_offset', 0), elem_offset=elem_offset,
         limit=getattr(entry, 'count', 0))
 
 

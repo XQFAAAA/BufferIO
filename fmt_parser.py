@@ -122,6 +122,7 @@ class ResourceSet:
         self.ib_txt = None          # FA 模式的 ib txt（含 format/first/count）
         self.ib_data = None         # ib 数据文件路径
         self.vb_files = {}          # input_slot -> vb 数据文件路径
+        self.vb_txt_files = {}      # input_slot -> vb 的 txt 头部文件路径（含 byte offset/stride）
 
 
 def discover_resources(fmt_path: Path) -> ResourceSet:
@@ -166,7 +167,12 @@ def discover_resources(fmt_path: Path) -> ResourceSet:
             continue
         slot_match = re.match(rf'^{re.escape(prefix)}-vb(\d+)=', vb_buf.name)
         if slot_match:
-            resources.vb_files[int(slot_match.group(1))] = vb_buf
+            slot = int(slot_match.group(1))
+            resources.vb_files[slot] = vb_buf
+            # 同 basename 的 txt（含 byte offset/stride 等头部）
+            vb_txt = vb_buf.with_suffix('.txt')
+            if vb_txt.is_file():
+                resources.vb_txt_files[slot] = vb_txt
 
     if not resources.vb_files:
         raise FmtError(f'找不到顶点缓冲: {prefix}-vb*=*.buf')

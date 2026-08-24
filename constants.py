@@ -3,27 +3,9 @@
 from pathlib import Path
 
 
-# Mesh 模式的语义枚举：(标识符, 显示名, 说明)
+# FMT 模式的语义枚举
 # 标识符即导入时使用的语义关键字，与 3dmigoto/DXGI 命名一致
 # INDEX 为三角形索引缓冲（支持直接解析 3dmigoto ib txt）
-ATTRIBUTE_SEMANTIC_ITEMS = [
-    ('INDEX', 'INDEX', '三角形索引缓冲（支持 3dmigoto ib txt 直接解析）'),
-    ('POSITION', 'POSITION', '顶点位置'),
-    ('TANGENT', 'TANGENT', '顶点切线'),
-    ('NORMAL', 'NORMAL', '顶点法线'),
-    ('COLOR', 'COLOR', '顶点色'),
-    ('TEXCOORD', 'TEXCOORD', 'UV 贴图坐标'),
-    ('BLENDINDICES', 'BLENDINDICES', '骨骼权重索引'),
-    ('BLENDWEIGHTS', 'BLENDWEIGHTS', '骨骼权重值'),
-    ('SHAPEKEY_OFFSET', 'SHAPEKEY_OFFSET', '形态键顶点偏移边界（R32_UINT，如 [0,1244,...]）'),
-    ('SHAPEKEY_VERTEXID', 'SHAPEKEY_VERTEXID', '形态键顶点 id 列表（R32_UINT）'),
-    ('SHAPEKEY_VERTEXOFFSET', 'SHAPEKEY_VERTEXOFFSET', '形态键顶点位移向量列表（R16G16B16_FLOAT）'),
-    ('SHAPEKEY', 'SHAPEKEY', '形态键逐顶点位移（R16G16B16_FLOAT，索引即 Deform 编号，如 SHAPEKEY 23 = Deform 23 的位移）'),
-    ('BONEMATRIX', 'BONEMATRIX', '骨骼 3×4 矩阵（MATRIX3X4_FLOAT，索引即骨骼号，与 BLENDINDICES 对应）'),
-]
-
-# FMT 模式的语义枚举：比 Mesh 模式多一个 SKIP（不导入该元素）
-# 加载 FMT 时按 SEMANTIC_GUESS 自动猜测，用户可在列表中手动修正
 ELEMENT_SEMANTIC_ITEMS = [
     ('SKIP', 'SKIP', '不导入该元素'),
     ('INDEX', 'INDEX', '三角形索引缓冲'),
@@ -86,8 +68,6 @@ AXIS_ITEMS = [
 
 # 语义方案保存目录：插件安装目录下（不随 .blend 工程变化）
 SEMANTICS_DIR = Path(__file__).resolve().parent / 'semantics'
-# Mesh 预设保存目录
-MESH_PRESETS_DIR = Path(__file__).resolve().parent / 'mesh_presets'
 
 
 def _semantics_items(self, context):
@@ -98,15 +78,4 @@ def _semantics_items(self, context):
             items.append((path.stem, path.stem, str(path)))
     if not items:
         items.append(('', '（无已保存方案）', ''))
-    return items
-
-
-def _mesh_preset_items(self, context):
-    """动态枚举插件本地已保存的 Mesh 预设"""
-    items = []
-    if MESH_PRESETS_DIR.is_dir():
-        for i, path in enumerate(sorted(MESH_PRESETS_DIR.glob('*.json'))):
-            items.append((path.stem, path.stem, str(path)))
-    if not items:
-        items.append(('', '（无已保存预设）', ''))
     return items
