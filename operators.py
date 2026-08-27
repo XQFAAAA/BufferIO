@@ -168,7 +168,7 @@ class BUFFERIO_OT_load_semantics(bpy.types.Operator):
             return {'CANCELLED'}
 
         valid_sem = {i[0] for i in ELEMENT_SEMANTIC_ITEMS}
-        valid_fmt = {i[0] for i in dxgi.format_enum_items()}
+        valid_fmt = set(dxgi.SUPPORTED_FORMATS)
         elems = context.scene.bufferio_elements
         # 保留现有文件路径，加载预设后按索引恢复（预设本身不含路径）
         old_paths = [(e.filepath, e.ib_txt) for e in elems]

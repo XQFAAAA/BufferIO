@@ -193,7 +193,7 @@ for _extra in ('B8G8R8A8_UNORM', 'B8G8R8A8_SNORM', 'MATRIX3X4_FLOAT', 'R10G10B10
     except FormatError:
         pass
 
-# 各语义推荐使用的常用格式（格式下拉列表置顶显示；只保留受支持的格式）
+# 各语义推荐使用的常用格式（仅供 UI 提示；不要用于动态枚举排序，否则会因列表重排使已选格式漂移）
 SEMANTIC_FORMATS = {
     'INDEX': ('R16_UINT', 'R32_UINT'),
     'POSITION': ('R32G32B32_FLOAT',),
@@ -210,20 +210,6 @@ SEMANTIC_FORMATS = {
     'BONEMATRIX': ('MATRIX3X4_FLOAT',),
 }
 
-
-def format_enum_items(self=None, context=None):
-    """生成格式下拉项：当前语义推荐的格式置顶，分隔后列出全部格式
-
-    self 为拥有该属性的元素（BufferIOElement，含 semantic 属性）时按语义推荐；
-    无 self 或语义无推荐时仅返回全部格式（含空标识符分隔项）。
-    """
-    recommended = []
-    if self is not None:
-        semantic = getattr(self, 'semantic', '')
-        recommended = [name for name in SEMANTIC_FORMATS.get(semantic, ())
-                       if name in SUPPORTED_FORMATS]
-    items = [(name, name, '') for name in recommended]
-    if recommended:
-        items.append(('', '全部格式', ''))
-    items.extend((name, name, '') for name in SUPPORTED_FORMATS)
-    return items
+# 格式下拉的静态枚举项（固定顺序）。必须保持静态：
+# Blender 的 EnumProperty 以整数索引存储值，动态重排列表会让已选格式漂移到别的格式。
+FORMAT_ENUM_ITEMS = tuple((name, name, '') for name in SUPPORTED_FORMATS)

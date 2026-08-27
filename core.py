@@ -298,10 +298,14 @@ def build_and_link(context, name, faces, arrays, flip_winding, flip_texcoord_v,
 
     # 自动创建骨架：骨骼矩阵 + 顶点组权重 -> Armature 蒙皮
     if bone_matrices is not None and len(bone_matrices):
+        # 只导入 BLENDINDICES 中实际引用到的骨骼，跳过缓冲中的无效/未使用槽位
+        used_bones = set()
+        for _, data in get('BLENDINDICES').items():
+            used_bones |= buffer_io._collect_used_bone_indices(data)
         arm_obj = buffer_io.build_armature(
             armature_name or f'{name}_Armature', bone_matrices,
             scale=scale, mirror_x=mirror_x, conversion=conversion,
-            collection=collection)
+            collection=collection, indices=used_bones or None)
         modifier = obj.modifiers.new(name='Armature', type='ARMATURE')
         modifier.object = arm_obj
         # 骨架设为模型的父级（对象本身保持无变换）

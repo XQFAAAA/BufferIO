@@ -3,6 +3,8 @@
 import bpy
 from bpy.types import Panel, UIList
 
+from . import dxgi
+
 
 class BUFFERIO_UL_elements(UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname):
@@ -92,6 +94,10 @@ class BUFFERIO_PT_main(Panel):
                     box.prop(item, 'first_index')
                     box.prop(item, 'index_count')
                 box.prop(item, 'format')
+                recommended = [name for name in dxgi.SEMANTIC_FORMATS.get(item.semantic, ())
+                               if name in dxgi.SUPPORTED_FORMATS]
+                if recommended:
+                    box.label(text='推荐格式: ' + ' / '.join(recommended))
                 box.prop(item, 'stride')
                 box.prop(item, 'offset')
                 box.prop(item, 'count')

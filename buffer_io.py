@@ -254,6 +254,14 @@ def build_object(name, faces, positions, normals=None, tangents=None, uvs=None,
     return obj
 
 
+def _collect_used_bone_indices(indices):
+    """从骨骼索引数组收集实际使用到的骨骼索引集合（未引用即无效/未使用槽位）"""
+    arr = numpy.asarray(indices)
+    if arr.size == 0:
+        return set()
+    return set(int(i) for i in numpy.unique(arr))
+
+
 def _import_vertex_groups(obj, blend_indices, blend_weights):
     if not blend_indices or not blend_weights:
         return
@@ -277,11 +285,14 @@ def _import_vertex_groups(obj, blend_indices, blend_weights):
     indices = numpy.concatenate([to_2d(a) for a in idx_parts], axis=1).astype(numpy.int64)
     weights = numpy.concatenate([to_2d(a) for a in wt_parts], axis=1).astype(numpy.float32)
 
-    max_index = int(indices.max()) if indices.size else -1
-    if max_index < 0:
+    # 只创建实际被引用到的骨骼组（跳过缓冲中的无效索引）
+    used = _collect_used_bone_indices(indices)
+    if not used:
         return
 
-    groups = [obj.vertex_groups.new(name=str(i)) for i in range(max_index + 1)]
+    groups = {}
+    for i in sorted(used):
+        groups[i] = obj.vertex_groups.new(name=str(i))
 
     for vertex_id, (v_indices, v_weights) in enumerate(zip(indices, weights)):
         for index, weight in zip(v_indices, v_weights):
@@ -364,10 +375,12 @@ def _import_shape_keys(obj, positions, shape_keys, shape_key_arrays=None,
 
 
 def build_armature(name, matrices, scale=1.0, mirror_x=False, conversion=None,
-                   collection=None):
+                   collection=None, indices=None):
     """创建骨架对象：骨骼 rest 全部位于原点（无父子），姿态应用骨骼矩阵
 
     matrices: (n, 3, 4) 行主序 3×4 蒙皮矩阵（索引即骨骼号）
+    indices:  可选，实际使用到的骨骼索引集合；仅创建这些骨骼（按原索引命名），
+              跳过缓冲中未被顶点组引用（无效/未使用）的槽位；None = 创建全部骨骼。
     scale:    全局缩放，与网格顶点缩放一致（先作用于骨骼平移，再做轴相似变换）
     mirror_x: 沿 X 轴镜像（与网格顶点镜像一致，骨骼矩阵做 X·M·X 相似变换）
     conversion: 坐标轴转换矩阵（mathutils 4×4），骨骼矩阵做相似变换 C·M·C⁻¹，
@@ -391,11 +404,17 @@ def build_armature(name, matrices, scale=1.0, mirror_x=False, conversion=None,
     arm_obj.select_set(True)
     bpy.context.view_layer.objects.active = arm_obj
 
+    # 仅创建被引用的骨骼（按原索引命名，跳过越界的无效索引）；bone_indices 为原索引列表
+    if indices is not None:
+        bone_indices = [i for i in sorted(indices) if 0 <= i < len(matrices)]
+    else:
+        bone_indices = list(range(len(matrices)))
+
     # 编辑模式创建骨骼：全部位于原点、无父级、沿 +Y 单位长度
     # （Blender 骨骼局部 Y 轴沿骨骼方向，tail 沿 +Y 时 matrix_local = I）
     bpy.ops.object.mode_set(mode='EDIT')
     try:
-        for i in range(len(matrices)):
+        for i in bone_indices:
             bone = arm_data.edit_bones.new(str(i))
             bone.head = (0.0, 0.0, 0.0)
             bone.tail = (0.0, 0.1, 0.0)
@@ -413,7 +432,8 @@ def build_armature(name, matrices, scale=1.0, mirror_x=False, conversion=None,
         ))
 
     # 姿态：零矩阵（未使用的骨骼池槽位）旋转退化，保持原点姿态即可
-    for i, M in enumerate(matrices):
+    for i in bone_indices:
+        M = matrices[i]
         R = M[:3, :3]
         if numpy.linalg.norm(R) < 1e-4:
             continue

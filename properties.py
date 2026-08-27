@@ -89,9 +89,8 @@ class BufferIOElement(bpy.types.PropertyGroup):
                              description='索引数量；0 = 不限制，选择 txt 路径后自动从头部填入，可手动修改')
     count: IntProperty(name='数量', default=0, min=0,
                        description='读取元素数量；0 = 不限制（缓冲末尾可能存在无效数据，可限制只读前 N 个）')
-    # 动态枚举（items 为回调）不支持字符串 default，只能为 None；
-    # 元素创建时（element_add / 加载 FMT / 加载预设）会显式写入格式
-    format: EnumProperty(name='格式', items=dxgi.format_enum_items, default=None)
+    # 静态枚举（固定顺序，值不随语义变化而漂移）；默认值在创建元素/加载时显式写入
+    format: EnumProperty(name='格式', items=dxgi.FORMAT_ENUM_ITEMS, default='R32G32B32_FLOAT')
     input_slot: IntProperty()
     offset: IntProperty(name='偏移', default=0,
                         description='顶点属性：元素在步长内的字节偏移（AlignedByteOffset）')
