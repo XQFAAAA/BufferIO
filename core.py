@@ -262,8 +262,11 @@ def build_and_link(context, name, faces, arrays, flip_winding, flip_texcoord_v,
         return {index: data for (sem, index), data in arrays.items() if sem == semantic}
 
     def get_first(semantic):
+        # 取该语义目标索引最小的数组，而不是只认索引 0：
+        # NORMAL/TANGENT 的目标索引常被设为源语义索引（如 wuwa 预设 NORMAL=2、TANGENT=1），
+        # 之前只查索引 0 会把法线/切线静默丢弃，导入后网格仍用自动法线
         values = get(semantic)
-        return values.get(0) if values else None
+        return values[min(values)] if values else None
 
     positions = get_first('POSITION')
     if positions is None:
