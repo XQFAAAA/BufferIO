@@ -56,7 +56,7 @@ def parse_fmt_text(text: str) -> FmtData:
         if line.startswith('element['):
             end = line.find(']')
             if end == -1:
-                raise FmtError(f'元素行损坏: `{line}`')
+                raise FmtError(f'Malformed element line: `{line}`')
             element_id = int(line[len('element['):end])
             current_element = {}
             elements[element_id] = current_element
@@ -102,10 +102,10 @@ def parse_fmt_text(text: str) -> FmtData:
                 input_slot_class=e.get('InputSlotClass', 'per-vertex'),
             ))
         except KeyError as err:
-            raise FmtError(f'element[{element_id}] 缺少字段 {err}')
+            raise FmtError(f'element[{element_id}] is missing field {err}')
 
     if fmt.topology != 'trianglelist':
-        raise FmtError(f'暂不支持拓扑类型: {fmt.topology}')
+        raise FmtError(f'Unsupported topology type: {fmt.topology}')
 
     return fmt
 
@@ -137,9 +137,9 @@ def discover_resources(fmt_path: Path) -> ResourceSet:
         ib_path = fmt_path.with_suffix('.ib')
         vb_path = fmt_path.with_suffix('.vb')
         if not ib_path.is_file():
-            raise FmtError(f'找不到索引缓冲文件: {ib_path}')
+            raise FmtError(f'Index buffer file not found: {ib_path}')
         if not vb_path.is_file():
-            raise FmtError(f'找不到顶点缓冲文件: {vb_path}')
+            raise FmtError(f'Vertex buffer file not found: {vb_path}')
         resources.ib_data = ib_path
         resources.vb_files = {0: vb_path}
         return resources
@@ -147,18 +147,18 @@ def discover_resources(fmt_path: Path) -> ResourceSet:
     # FrameAnalysis 风格: 000984-vb0=hash-vs=...-ps=....txt
     match = re.match(r'^(\d+)-', fmt_path.name)
     if not match:
-        raise FmtError(f'无法从文件名识别资源前缀: {fmt_path.name}')
+        raise FmtError(f'Cannot identify resource prefix from filename: {fmt_path.name}')
     prefix = match.group(1)
     resources.kind = 'FA'
 
     # 搜索 ib: 000984-ib=....txt / .buf
     ib_txt_list = sorted(directory.glob(f'{prefix}-ib=*.txt'))
     if not ib_txt_list:
-        raise FmtError(f'找不到索引缓冲: {prefix}-ib=*.txt')
+        raise FmtError(f'Index buffer not found: {prefix}-ib=*.txt')
     resources.ib_txt = ib_txt_list[0]
     ib_buf = resources.ib_txt.with_suffix('.buf')
     if not ib_buf.is_file():
-        raise FmtError(f'找不到索引缓冲数据: {ib_buf}')
+        raise FmtError(f'Index buffer data not found: {ib_buf}')
     resources.ib_data = ib_buf
 
     # 搜索 vb: 000984-vb0=...buf, 000984-vb1=...buf ...
@@ -175,6 +175,6 @@ def discover_resources(fmt_path: Path) -> ResourceSet:
                 resources.vb_txt_files[slot] = vb_txt
 
     if not resources.vb_files:
-        raise FmtError(f'找不到顶点缓冲: {prefix}-vb*=*.buf')
+        raise FmtError(f'Vertex buffer not found: {prefix}-vb*=*.buf')
 
     return resources

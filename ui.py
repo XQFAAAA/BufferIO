@@ -1,4 +1,4 @@
-"""BufferIO UI：列表（UIList）与主面板（Panel）。"""
+"""BufferIO UI：列表（UIList）与 3D 视图侧面板（Panel）。"""
 
 import bpy
 from bpy.types import Panel, UIList
@@ -40,7 +40,7 @@ class BUFFERIO_PT_main(Panel):
         row = box.row()
         row.prop(scene, 'bufferio_show_options', emboss=False,
                  icon='TRIA_DOWN' if scene.bufferio_show_options else 'TRIA_RIGHT',
-                 text='变换选项')
+                 text='Transform Options')
         if scene.bufferio_show_options:
             box.prop(scene, 'bufferio_flip_winding')
             box.prop(scene, 'bufferio_flip_texcoord_v')
@@ -48,9 +48,9 @@ class BUFFERIO_PT_main(Panel):
             box.prop(scene, 'bufferio_mirror_x')
             box.prop(scene, 'bufferio_global_scale')
             row = box.row(align=True)
-            row.label(text='坐标轴')
-            row.prop(scene, 'bufferio_axis_forward', text='前')
-            row.prop(scene, 'bufferio_axis_up', text='上')
+            row.label(text='Axes')
+            row.prop(scene, 'bufferio_axis_forward', text='Fwd')
+            row.prop(scene, 'bufferio_axis_up', text='Up')
 
         # 导入按钮统一放在面板最下方
         layout.operator('bufferio.import_fmt', icon='IMPORT')
@@ -97,7 +97,7 @@ class BUFFERIO_PT_main(Panel):
                 recommended = [name for name in dxgi.SEMANTIC_FORMATS.get(item.semantic, ())
                                if name in dxgi.SUPPORTED_FORMATS]
                 if recommended:
-                    box.label(text='推荐格式: ' + ' / '.join(recommended))
+                    box.label(text='Recommended format: ' + ' / '.join(recommended))
                 box.prop(item, 'stride')
                 box.prop(item, 'offset')
                 box.prop(item, 'count')

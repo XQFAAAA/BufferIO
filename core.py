@@ -8,7 +8,6 @@ from bpy_extras.io_utils import axis_conversion
 
 from . import buffer_io
 from . import dxgi
-from . import fmt_parser
 from .constants import FLOAT_SEMANTICS
 
 
@@ -20,7 +19,7 @@ def validate_entries(entries):
     2 黄(QUESTION)：相邻项偏移差 != 前一项格式字节宽度（布局不连续，优先于越界 ERROR）
 
     返回 dict：{'red': int, 'yellow': int, 'missing': [str, ...]}
-    missing 为缺失的必需语义（INDEX / POSITION）
+    missing 为缺失的必需语义（IndexBuffer / POSITION）
     """
     # 先清空所有项的旧警告状态，避免上次校验残留
     for entry in entries:
@@ -95,11 +94,11 @@ def validate_entries(entries):
             if stride > 0 and e.offset + width(e) > stride and e.warning != 2:
                 e.warning = 1
 
-    # 规则5：检查必需语义是否存在（INDEX 与 POSITION）
+    # 规则5：检查必需语义是否存在（IndexBuffer 与 POSITION）
     missing = []
     enabled_sem = {getattr(e, 'semantic', None) for e in entries if getattr(e, 'enabled', True)}
     if 'INDEX' not in enabled_sem:
-        missing.append('INDEX')
+        missing.append('Index Buffer')
     if 'POSITION' not in enabled_sem:
         missing.append('POSITION')
 
@@ -158,9 +157,9 @@ def _read_index_entry(entry, filepath):
     if getattr(entry, 'ib_txt', ''):
         ib_txt = entry.ib_txt
         if not Path(ib_txt).is_file():
-            raise buffer_io.BufferIOError(f'IB txt 不存在: {ib_txt}')
+            raise buffer_io.BufferIOError(f'IB txt not found: {ib_txt}')
         return buffer_io.read_indices_from_ib_txt(ib_txt)
-    raise buffer_io.BufferIOError(f'{entry.semantic} 未指定文件路径')
+    raise buffer_io.BufferIOError(f'{entry.semantic}: no file path specified')
 
 
 def _read_vertex_entry(entry, filepath):
@@ -192,12 +191,16 @@ def collect_vertex_arrays(entries):
             continue
 
         if not filepath:
-            raise buffer_io.BufferIOError(f'{entry.semantic} 未指定文件路径')
+            raise buffer_io.BufferIOError(f'{entry.semantic}: no file path specified')
         array, fmt = _read_vertex_entry(entry, filepath)
 
         # 目标索引决定 UV/颜色等属性的编号（如 TEXCOORD 0-3）
         key = (entry.semantic, getattr(entry, 'index', entry.semantic_index))
-        if entry.semantic in FLOAT_SEMANTICS:
+        if (entry.semantic == 'NORMAL' and fmt.packed
+                and fmt.name.startswith('R10G10B10A2')):
+            # 八面体法线属于语义层约定（与节点里的“终末地”算法一致）
+            arrays[key] = dxgi.decode_octahedral_10bit(array)
+        elif entry.semantic in FLOAT_SEMANTICS:
             arrays[key] = fmt.to_float(array)
         else:
             arrays[key] = numpy.ascontiguousarray(array)
@@ -207,7 +210,12 @@ def collect_vertex_arrays(entries):
 
 def build_and_link(context, name, faces, arrays, flip_winding, flip_texcoord_v,
                    scale=1.0, mirror_x=False, axis_forward='-Y', axis_up='Z',
-                   armature_name=None):
+                   armature_name=None, shape_keys=None, bone_matrices=None,
+                   vertex_map=None):
+    # 数组内容只读使用，但下面会从字典中取出形态键 / 骨骼矩阵数据，
+    # 浅复制字典即可，避免改动多个 Import 节点共享的 MeshData.arrays
+    arrays = dict(arrays)
+
     # 未提供面索引时需用原始顶点数生成顺序三角形
     positions_orig = arrays.get(('POSITION', 0))
     if positions_orig is None:
@@ -217,40 +225,47 @@ def build_and_link(context, name, faces, arrays, flip_winding, flip_texcoord_v,
                 positions_orig = data
                 break
     if positions_orig is None:
-        raise buffer_io.BufferIOError('缺少顶点位置（POSITION）数据')
+        raise buffer_io.BufferIOError('Missing vertex position (POSITION) data')
 
     if faces is None:
         if len(positions_orig) % 3 != 0:
             raise buffer_io.BufferIOError(
-                f'未提供面索引且顶点数 {len(positions_orig)} 不是 3 的倍数')
+                f'No faces provided and vertex count {len(positions_orig)} is not a multiple of 3')
         faces = numpy.arange(len(positions_orig), dtype=numpy.uint32).reshape(-1, 3)
 
     # 形态键数据是分段索引（非 per-vertex 属性），须在顶点压缩前取出，
     # 避免被 compact_vertices 当作顶点数组切片。
     # 支持按索引分组：如 SHAPEKEY_OFFSET/ID/OFFSET 索引 0 一组、索引 1 一组...
+    # 节点式导入可直接传入已分组的 shape_keys，跳过从 arrays 提取。
     sk_groups = []
-    for key in [k for k in list(arrays.keys()) if k[0] == 'SHAPEKEY_OFFSET']:
-        idx = key[1]
-        sk_offsets = arrays.pop(key, None)
-        sk_ids = arrays.pop(('SHAPEKEY_VERTEXID', idx), None)
-        sk_vecs = arrays.pop(('SHAPEKEY_VERTEXOFFSET', idx), None)
-        if sk_offsets is not None and sk_ids is not None and sk_vecs is not None:
-            # ShapeKeyOffset 出现不递增（<= 上一个）时，其后为无效数据，截断
-            sk_groups.append(_trim_shapekey_data(sk_offsets, sk_ids, sk_vecs))
+    if shape_keys is not None:
+        sk_groups = [_trim_shapekey_data(*group) for group in shape_keys]
+    else:
+        for key in [k for k in list(arrays.keys()) if k[0] == 'SHAPEKEY_OFFSET']:
+            idx = key[1]
+            sk_offsets = arrays.pop(key, None)
+            sk_ids = arrays.pop(('SHAPEKEY_VERTEXID', idx), None)
+            sk_vecs = arrays.pop(('SHAPEKEY_VERTEXOFFSET', idx), None)
+            if sk_offsets is not None and sk_ids is not None and sk_vecs is not None:
+                # ShapeKeyOffset 出现不递增（<= 上一个）时，其后为无效数据，截断
+                sk_groups.append(_trim_shapekey_data(sk_offsets, sk_ids, sk_vecs))
     shape_keys = sk_groups if sk_groups else None
 
     # 骨骼矩阵为按骨骼组织的分段数据（非逐顶点），须在顶点压缩前取出
-    # 取第一个 BONEMATRIX 条目（多组骨骼暂只支持一组）
-    bone_matrices = None
-    for key in [k for k in list(arrays.keys()) if k[0] == 'BONEMATRIX']:
-        data = arrays.pop(key, None)
-        if data is not None:
-            bone_matrices = numpy.ascontiguousarray(data).reshape(-1, 3, 4)
-            break
+    # 取第一个 BONEMATRIX 条目（多组骨骼暂只支持一组）；节点式导入可直接传入
+    if bone_matrices is not None:
+        bone_matrices = numpy.ascontiguousarray(bone_matrices).reshape(-1, 3, 4)
+    else:
+        for key in [k for k in list(arrays.keys()) if k[0] == 'BONEMATRIX']:
+            data = arrays.pop(key, None)
+            if data is not None:
+                bone_matrices = numpy.ascontiguousarray(data).reshape(-1, 3, 4)
+                break
 
-    # 顶点压缩会对所有数组做 v_min 重基与切片，
-    # 之后所有属性必须从压缩后的 arrays 中重新取，否则与 faces 索引不一致
-    faces, arrays, v_min = buffer_io.compact_vertices(faces, arrays)
+    # 顶点压缩会对所有数组做重排与切片，之后所有属性必须从压缩后的 arrays 中重新取。
+    # 节点式导入已在 Mesh Assemble 中压缩过，直接用它的映射表，避免重复处理。
+    if vertex_map is None:
+        faces, arrays, vertex_map = buffer_io.compact_vertices(faces, arrays)
 
     # 逐顶点形态键（SHAPEKEY 索引即 Deform 编号）：随顶点压缩一致切片，
     # 每个 (SHAPEKEY, i) 数组是第 i 个形态键各顶点的位移向量
@@ -270,7 +285,7 @@ def build_and_link(context, name, faces, arrays, flip_winding, flip_texcoord_v,
 
     positions = get_first('POSITION')
     if positions is None:
-        raise buffer_io.BufferIOError('缺少顶点位置（POSITION）数据')
+        raise buffer_io.BufferIOError('Missing vertex position (POSITION) data')
 
     # 坐标系变换：将源坐标轴映射到 Blender 的 -Y 前 / Z 上，
     # 作用于顶点/法线/形态键与骨骼矩阵数据本身，对象保持无变换
@@ -288,7 +303,7 @@ def build_and_link(context, name, faces, arrays, flip_winding, flip_texcoord_v,
         blend_weights=get('BLENDWEIGHTS'),
         shape_keys=shape_keys,
         shape_key_arrays=shape_key_arrays or None,
-        shape_key_offset=v_min,
+        vertex_map=vertex_map,
         flip_winding=flip_winding,
         flip_texcoord_v=flip_texcoord_v,
         scale=scale,
