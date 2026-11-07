@@ -43,11 +43,16 @@ class FmtData:
 
 def parse_fmt_text(text: str) -> FmtData:
     """解析 WWMI .fmt 或 3dmigoto FrameAnalysis .txt 的头部"""
+    return _parse_fmt_lines(text.splitlines())
+
+
+def _parse_fmt_lines(lines) -> FmtData:
+    """按行迭代解析头部：遇到数据区立即停止，不消费剩余内容"""
     fmt = FmtData()
     current_element = None
     elements = {}
 
-    for raw_line in text.splitlines():
+    for raw_line in lines:
         line = raw_line.strip()
         if not line:
             continue
@@ -111,8 +116,13 @@ def parse_fmt_text(text: str) -> FmtData:
 
 
 def parse_fmt_file(path: Path) -> FmtData:
+    """只读到数据区为止。
+
+    FrameAnalysis 的 txt 在头部之后是整块 hexdump（单文件可达数十 MB），
+    全文读取是批量导入的主要性能瓶颈；文件对象按行迭代只消费头部。
+    """
     with open(path, 'r', encoding='utf-8', errors='replace') as f:
-        return parse_fmt_text(f.read())
+        return _parse_fmt_lines(f)
 
 
 class ResourceSet:

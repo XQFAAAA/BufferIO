@@ -1,4 +1,4 @@
-"""BufferIO 核心逻辑：条目校验、顶点数组收集、网格对象构建与链接。"""
+"""BufferIO 核心逻辑：索引/形态键数据读取、网格对象构建与链接。"""
 
 from pathlib import Path
 
@@ -7,104 +7,6 @@ import bpy
 from bpy_extras.io_utils import axis_conversion
 
 from . import buffer_io
-from . import dxgi
-from .constants import FLOAT_SEMANTICS
-
-
-def validate_entries(entries):
-    """校验列表项的步长与偏移，设置每项 warning 状态（仅提示不影响导入）
-
-    0 正常 /
-    1 红(ERROR)：同文件步长不一致；格式越界（offset+宽度>步长）；或 SemanticName/SemanticIndex 冲突 /
-    2 黄(QUESTION)：相邻项偏移差 != 前一项格式字节宽度（布局不连续，优先于越界 ERROR）
-
-    返回 dict：{'red': int, 'yellow': int, 'missing': [str, ...]}
-    missing 为缺失的必需语义（IndexBuffer / POSITION）
-    """
-    # 先清空所有项的旧警告状态，避免上次校验残留
-    for entry in entries:
-        entry.warning = 0
-
-    # 按文件来源分组
-    groups = {}
-    for entry in entries:
-        fp = getattr(entry, 'filepath', '') or getattr(entry, 'source_file', '')
-        if not fp:
-            continue
-        groups.setdefault(fp, []).append(entry)
-
-    for fp, group in groups.items():
-        # 规则1：同文件非索引项步长应一致，否则全组 ERROR
-        # （INDEX 为平铺数据，stride 无意义，不参与比较）
-        strides = {e.stride for e in group if e.semantic != 'INDEX'}
-        if len(strides) > 1:
-            for e in group:
-                e.warning = 1
-            continue
-
-        # 索引为平铺数据（offset 是文件偏移），不参与字节布局校验
-        non_index = [e for e in group if e.semantic != 'INDEX']
-
-        # 组内无非索引项（只有 INDEX）或无有效步长，跳过字节布局校验
-        if not non_index or not strides:
-            continue
-
-        stride = next(iter(strides))
-
-        def width(e):
-            try:
-                return dxgi.DXGIFormat(e.format).byte_width
-            except dxgi.FormatError:
-                return -1
-
-        # 规则3：相邻项偏移差应等于前一项格式字节宽度（布局连续），
-        # 不连续则前项与后项同时标 QUESTION；最后一项与步长的间隙不匹配标自身
-        ordered = sorted(non_index, key=lambda e: e.offset)
-        for i, e in enumerate(ordered):
-            if i + 1 < len(ordered):
-                gap = ordered[i + 1].offset - e.offset
-            else:
-                gap = stride - e.offset
-            if stride > 0 and gap != width(e):
-                e.warning = 2
-                if i + 1 < len(ordered):
-                    ordered[i + 1].warning = 2
-
-        # 规则4：SemanticName/SemanticIndex 冲突——同一原始语义被重复映射标 ERROR
-        # （不覆盖已标 QUESTION 的项）
-        seen = {}
-        for e in non_index:
-            if not getattr(e, 'enabled', True):
-                continue
-            if getattr(e, 'semantic', 'SKIP') == 'SKIP':
-                continue
-            name = getattr(e, 'semantic_name', '') or e.semantic
-            key = (name, e.semantic_index)
-            if key in seen:
-                if e.warning != 2:
-                    e.warning = 1
-                if seen[key].warning != 2:
-                    seen[key].warning = 1
-            else:
-                seen[key] = e
-
-        # 规则2：格式越界（offset+宽度>步长）标 ERROR，
-        # 但已被 QUESTION（布局不连续）标记的项保持 QUESTION
-        for e in non_index:
-            if stride > 0 and e.offset + width(e) > stride and e.warning != 2:
-                e.warning = 1
-
-    # 规则5：检查必需语义是否存在（IndexBuffer 与 POSITION）
-    missing = []
-    enabled_sem = {getattr(e, 'semantic', None) for e in entries if getattr(e, 'enabled', True)}
-    if 'INDEX' not in enabled_sem:
-        missing.append('Index Buffer')
-    if 'POSITION' not in enabled_sem:
-        missing.append('POSITION')
-
-    red = sum(1 for e in entries if e.warning == 1)
-    yellow = sum(1 for e in entries if e.warning == 2)
-    return {'red': red, 'yellow': yellow, 'missing': missing}
 
 
 def _trim_shapekey_data(offsets, vertex_ids, vertex_offsets):
@@ -160,52 +62,6 @@ def _read_index_entry(entry, filepath):
             raise buffer_io.BufferIOError(f'IB txt not found: {ib_txt}')
         return buffer_io.read_indices_from_ib_txt(ib_txt)
     raise buffer_io.BufferIOError(f'{entry.semantic}: no file path specified')
-
-
-def _read_vertex_entry(entry, filepath):
-    """读取顶点属性条目数组，返回 (array, fmt)"""
-    # offset：元素在步长内的字节偏移；byte_offset：数据在缓冲文件中的起始字节偏移
-    elem_offset = getattr(entry, 'offset', 0)
-    return buffer_io.read_buffer(
-        filepath, entry.format, stride=entry.stride,
-        offset=getattr(entry, 'byte_offset', 0), elem_offset=elem_offset,
-        limit=getattr(entry, 'count', 0))
-
-
-def collect_vertex_arrays(entries):
-    """读取条目数据并按语义分组
-
-    返回 (faces, vertex_arrays)
-    vertex_arrays 的键为 (semantic, semantic_index)
-    """
-    faces = None
-    arrays = {}
-
-    for entry in entries:
-        if not getattr(entry, 'enabled', True):
-            continue
-        filepath = getattr(entry, 'filepath', '') or getattr(entry, 'source_file', '')
-
-        if entry.semantic == 'INDEX':
-            faces = _read_index_entry(entry, filepath)
-            continue
-
-        if not filepath:
-            raise buffer_io.BufferIOError(f'{entry.semantic}: no file path specified')
-        array, fmt = _read_vertex_entry(entry, filepath)
-
-        # 目标索引决定 UV/颜色等属性的编号（如 TEXCOORD 0-3）
-        key = (entry.semantic, getattr(entry, 'index', entry.semantic_index))
-        if (entry.semantic == 'NORMAL' and fmt.packed
-                and fmt.name.startswith('R10G10B10A2')):
-            # 八面体法线属于语义层约定（与节点里的“终末地”算法一致）
-            arrays[key] = dxgi.decode_octahedral_10bit(array)
-        elif entry.semantic in FLOAT_SEMANTICS:
-            arrays[key] = fmt.to_float(array)
-        else:
-            arrays[key] = numpy.ascontiguousarray(array)
-
-    return faces, arrays
 
 
 def build_and_link(context, name, faces, arrays, flip_winding, flip_texcoord_v,

@@ -101,10 +101,10 @@ class BUFFERIO_NODE_mesh_assemble(BufferIONode):
 
     def draw_buttons(self, context, layout):
         row = layout.row(align=True)
-        op = row.operator('bufferio.assemble_slot', text='+ Array', icon='ADD')
+        op = row.operator('bufferio.assemble_slot', text='ELEMENT', icon='ADD')
         op.node_name = self.name
         op.delta = 1
-        op = row.operator('bufferio.assemble_slot', text='- Array', icon='REMOVE')
+        op = row.operator('bufferio.assemble_slot', text='ELEMENT', icon='REMOVE')
         op.node_name = self.name
         op.delta = -1
 

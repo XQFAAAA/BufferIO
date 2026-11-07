@@ -1,11 +1,11 @@
 """Vertex Buffer 节点：按文件 + 格式 + 步长读取任意顶点缓冲，并标注语义。
 
-原“通用缓冲 / Buffer Semantic”节点，现作为 VB ELEMENT DESC 节点组的内部元素节点：
-一个节点对应一个缓冲属性（或索引缓冲走 IndexBuffer 节点），输出 ArrayData。
+一个节点对应一个缓冲属性（索引缓冲走 Index Buffer 节点），输出 ArrayData；
+节点标签直接显示 `<Semantic Name> <Semantic Index>`（如 POSITION 0）。
 """
 
 import bpy
-from bpy.props import EnumProperty, IntProperty, StringProperty
+from bpy.props import EnumProperty, IntProperty
 
 from .. import buffer_io, dxgi
 from ..constants import ALGORITHM_ITEMS as BASE_ALGORITHM_ITEMS
@@ -24,6 +24,22 @@ BUFFER_SEMANTIC_ITEMS = [
     item for item in ELEMENT_SEMANTIC_ITEMS if item[0] not in EXCLUDED_SEMANTICS
 ]
 
+# 语义枚举值 -> 显示名，用于节点标签
+SEMANTIC_TITLES = {item[0]: item[1] for item in BUFFER_SEMANTIC_ITEMS}
+
+
+def semantic_title(semantic, index):
+    """<Semantic Name> <Semantic Index>"""
+    return f'{SEMANTIC_TITLES.get(semantic, semantic)} {int(index)}'
+
+
+def _update_semantic_label(self, context):
+    """改语义 / 改索引时同步节点标签"""
+    if self.get('cloning'):
+        return
+    self.label = semantic_title(self.semantic, self.semantic_index)
+
+
 # 顶点解码算法：默认 = 按格式规范解码（法线保留八面体解码），终末地 = 八面体法线算法
 ALGORITHM_ITEMS = BASE_ALGORITHM_ITEMS + [
     ('ENDFIELD', 'Endfield', 'Octahedral normal algorithm (normals only); also switches the format to R10G10B10A2'),
@@ -35,49 +51,30 @@ def _update_algorithm(self, context):
     if self.get('cloning'):
         return
     if self.algorithm == 'ENDFIELD' and self.semantic == 'NORMAL':
-        self.format = 'R10G10B10A2_UNORM'
+        self.set_socket_default('Format', 'R10G10B10A2_UNORM')
         self.disconnect_inputs(('Format',))
 
 
 class BUFFERIO_NODE_element_semantic(BufferIONode):
-    bl_idname = 'BufferIOGenericBuffer'  # 沿用旧 idname，兼容已保存的节点树
+    bl_idname = 'BufferIOGenericBuffer'
     bl_label = 'Vertex Buffer'
     bl_description = ('Read an arbitrary vertex buffer (file + format + stride/offset) '
-                      'and tag a target semantic; serves as the inner element node '
-                      'of the VB ELEMENT DESC node group')
+                      'and tag a target semantic')
     bl_icon = 'FILE_CACHE'
     CATEGORY_COLOR = (0.13, 0.20, 0.30)
 
-    filepath: StringProperty(name='File', subtype='FILE_PATH')
-    format: EnumProperty(name='Format', items=dxgi.FORMAT_ENUM_ITEMS,
-                         default='R32G32B32_FLOAT')
-    stride: IntProperty(name='Stride', default=0, min=0,
-                        description='0 = packed (equal to the format byte width)')
-    byte_offset: IntProperty(name='Byte Offset', default=0, min=0)
-    elem_offset: IntProperty(name='Element Offset', default=0, min=0)
-    count: IntProperty(name='Count', default=0, min=0,
-                       description='0 = unlimited')
     semantic: EnumProperty(name='Semantic', items=BUFFER_SEMANTIC_ITEMS,
-                           default='POSITION')
-    semantic_index: IntProperty(name='Semantic Index', default=0, min=0)
+                           default='POSITION', update=_update_semantic_label)
+    semantic_index: IntProperty(name='Semantic Index', default=0, min=0,
+                                update=_update_semantic_label)
     algorithm: EnumProperty(name='Algorithm', items=ALGORITHM_ITEMS,
                             default='KEEP', update=_update_algorithm,
                             description='Vertex decoding algorithm; Endfield also switches the format to R10G10B10A2')
 
-    # 未连接时在输入端口上直接编辑属性
-    SOCKET_PROPERTIES = {
-        'File': 'filepath',
-        'Format': 'format',
-        'Stride': 'stride',
-        'Byte Offset': 'byte_offset',
-        'Element Offset': 'elem_offset',
-        'Count': 'count',
-    }
-
     def init(self, context):
         super().init(context)
-        # 输入端：已连接时优先于节点属性
-        self.add_input('BufferIOSocketString', 'File')
+        # 输入端：已连接时优先于 socket 默认值
+        self.add_input('BufferIOSocketFile', 'File')
         self.add_input('BufferIOSocketFormat', 'Format')
         self.add_input('BufferIOSocketInt', 'Stride')
         self.add_input('BufferIOSocketInt', 'Byte Offset')
@@ -86,16 +83,14 @@ class BUFFERIO_NODE_element_semantic(BufferIONode):
         self.add_output('BufferIOSocketArray', 'Array')
 
     def evaluate(self, ctx):
-        filepath = self.input_string(ctx, 'File', self.filepath)
+        filepath = self.input_string(ctx, 'File')
         if not filepath:
             raise ValueError('No buffer file specified')
-        format_name = self.input_value(ctx, 'Format', self.format)
-        if format_name not in dxgi.SUPPORTED_FORMATS:
-            format_name = self.format
-        stride = max(int(self.input_value(ctx, 'Stride', self.stride) or 0), 0)
-        byte_offset = max(int(self.input_value(ctx, 'Byte Offset', self.byte_offset) or 0), 0)
-        elem_offset = max(int(self.input_value(ctx, 'Element Offset', self.elem_offset) or 0), 0)
-        count = max(int(self.input_value(ctx, 'Count', self.count) or 0), 0)
+        format_name = self.input_value(ctx, 'Format')
+        stride = max(int(self.input_value(ctx, 'Stride') or 0), 0)
+        byte_offset = max(int(self.input_value(ctx, 'Byte Offset') or 0), 0)
+        elem_offset = max(int(self.input_value(ctx, 'Element Offset') or 0), 0)
+        count = max(int(self.input_value(ctx, 'Count') or 0), 0)
 
         array, fmt = buffer_io.read_buffer(
             bpy.path.abspath(filepath), format_name, stride=stride,

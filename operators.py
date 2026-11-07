@@ -1,40 +1,99 @@
-"""BufferIO 操作符：
-- 侧面板：元素增删移动、校验、预设、加载 FMT、导入
-- 节点编辑器：VB ELEMENT DESC 解析/元素增删、一键装配、一键导入
+"""BufferIO 操作符：从 FrameAnalysis 文件夹批量生成节点。
+
+选择一个 FrameAnalysis dump 文件夹后按 drawcall 分组扫描：每组由
+`<draw id>-ib=<hash>-*.txt` 定位，ib / vb / 骨骼矩阵均从组内文件寻找；
+ib hash + first/count + 全部 vb hash 相同的组视为重复，跳过导入。
+导入时按解析结果创建 Vertex Buffer / Index Buffer / Mesh Assemble / Import
+节点（每组一个节点框）。组按 ib txt 的 first index 升序排列，Import 节点的
+Object Name 依次为 Component 0、Component 1……
 """
 
-import json
 import re
 from pathlib import Path
 
 import bpy
-from bpy.props import BoolProperty, EnumProperty, StringProperty
-from bpy.types import Operator
+from bpy.props import (BoolProperty, CollectionProperty, EnumProperty,
+                       IntProperty, StringProperty)
+from bpy.types import Operator, PropertyGroup
 
-from . import buffer_io
-from . import dxgi
-from .constants import (
-    ELEMENT_SEMANTIC_ITEMS,
-    SEMANTICS_DIR,
-)
-from .core import (
-    build_and_link,
-    collect_vertex_arrays,
-    validate_entries,
-)
-from .properties import (
-    _assign_id,
-    _auto_export_name,
-    parse_fmt_elements,
-)
+from . import fmt_parser
+from .nodes.element_semantic import (BUFFER_SEMANTIC_ITEMS,
+                                     EXCLUDED_SEMANTICS, semantic_title)
+from .properties import ElementList, _auto_export_name, parse_fmt_elements
 
-# 装配链节点（一键装配时整体重建；变换/骨骼矩阵已并入 Import 节点，不再单独成节点）
-CHAIN_NODES = {'BufferIOMeshAssemble', 'BufferIOOutput', 'BufferIOShapeKey',
-               'BufferIOShapeKeyApply', 'BufferIOBoneMatrix',
-               'BufferIOGenericBuffer'}
-# 节点图水平/垂直间距
+# 节点图间距
 NODE_GAP_X = 320.0
 NODE_GAP_Y = 170.0
+# 相邻 drawcall 节点框的水平间距
+GROUP_SPACING = 1600.0
+
+# ib txt 文件名：<draw id>-ib=<hash>-...（hash 截到下一个 '-' 或文件名结尾）
+IB_TXT_RE = re.compile(r'^(\d+)-ib=([0-9a-fA-F]+)')
+
+# vb 文件名：<draw id>-vb<N>=<hash>-...（骨骼矩阵 vs-cb* 不匹配此模式）
+VB_FILE_RE = re.compile(r'^(\d+)-vb\d+=([0-9a-fA-F]+)')
+
+# 游戏列表：当前 FrameAnalysis 布局规则仅有 wuwa 一项
+GAME_ITEMS = (
+    ('WUWA', 'WuWa', 'Wuthering Waves FrameAnalysis naming rules'),
+)
+
+
+class BUFFERIO_AttributeItem(PropertyGroup):
+    """语义映射条目：(Semantic Name, Semantic Index) -> (Semantic, Target Index)"""
+    semantic_name: StringProperty(
+        name='Semantic Name',
+        description='Original semantic name in the fmt (e.g. ATTRIBUTE, TEXCOORD)',
+        default='ATTRIBUTE')
+    semantic_index: IntProperty(
+        name='Semantic Index', default=0, min=0,
+        description='Index of the original semantic (e.g. 13 = ATTRIBUTE 13)')
+    semantic: EnumProperty(
+        name='Target Semantic', items=BUFFER_SEMANTIC_ITEMS, default='POSITION',
+        description='Target semantic used by the Vertex Buffer node')
+    target_index: IntProperty(
+        name='Target Index', default=0, min=0,
+        description='Written into the node Semantic Index; also decides the '
+                    'join order of BLENDINDICES/WEIGHTS')
+
+
+def apply_attribute_mapping(elements, attributes):
+    """按映射条目改写元素的目标语义与目标索引，返回被改写的元素数量"""
+    mapping = {
+        (item.semantic_name.upper(), int(item.semantic_index)):
+            (item.semantic, int(item.target_index))
+        for item in attributes if item.semantic_name
+    }
+    changed = 0
+    for elem in elements:
+        target = mapping.get((elem.semantic_name.upper(), elem.semantic_index))
+        if target is None:
+            continue
+        elem.semantic, elem.index = target
+        elem.semantic_index = target[1]
+        changed += 1
+    return changed
+
+
+class BUFFERIO_OT_import_fmt_attribute(Operator):
+    """Add or remove a semantic mapping entry"""
+    bl_idname = 'bufferio.import_fmt_attribute'
+    bl_label = 'Adjust Mapping Entries'
+    bl_options = {'INTERNAL'}
+
+    index: IntProperty(default=0)
+    delta: IntProperty(default=1, min=-1, max=1)
+
+    def execute(self, context):
+        # 文件对话框 / 调整面板中由 Blender 把当前操作符设为 active_operator
+        op = getattr(context, 'active_operator', None)
+        if op is None or op.bl_idname != 'BUFFERIO_OT_node_import_fmt':
+            return {'CANCELLED'}
+        if self.delta > 0:
+            op.attributes.add()
+        elif self.index < len(op.attributes):
+            op.attributes.remove(self.index)
+        return {'FINISHED'}
 
 
 def wuwa_shapekey_map(directory, prefix, report=None):
@@ -100,497 +159,13 @@ def wuwa_shapekey_map(directory, prefix, report=None):
     return result
 
 
-# --- 侧面板：元素列表 ------------------------------------------------------
+def _layout(node, frame, x, y):
+    """把节点挂到节点框下，并按框内相对坐标摆放"""
+    node.parent = frame
+    node.location = (x, y)
 
-class BUFFERIO_OT_element_add(bpy.types.Operator):
-    bl_idname = 'bufferio.element_add'
-    bl_label = 'Add Element'
-    bl_options = {'REGISTER', 'UNDO'}
 
-    def execute(self, context):
-        elems = context.scene.bufferio_elements
-        item = elems.add()
-        _assign_id(elems, item)
-        item.enabled = True
-        item.name = 'Custom Element'
-        item.format = 'R32G32B32_FLOAT'
-        context.scene.bufferio_elements_index = len(elems) - 1
-        return {'FINISHED'}
-
-
-class BUFFERIO_OT_element_remove(bpy.types.Operator):
-    bl_idname = 'bufferio.element_remove'
-    bl_label = 'Remove Element'
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        scene = context.scene
-        elems = scene.bufferio_elements
-        index = scene.bufferio_elements_index
-        if 0 <= index < len(elems):
-            elems.remove(index)
-            scene.bufferio_elements_index = min(index, len(elems) - 1)
-        return {'FINISHED'}
-
-
-class BUFFERIO_OT_element_move(bpy.types.Operator):
-    bl_idname = 'bufferio.element_move'
-    bl_label = 'Move Element'
-    bl_options = {'REGISTER', 'UNDO'}
-
-    direction: EnumProperty(name='Direction', items=(('UP', 'Up', ''), ('DOWN', 'Down', '')))
-
-    def execute(self, context):
-        scene = context.scene
-        elems = scene.bufferio_elements
-        index = scene.bufferio_elements_index
-        if self.direction == 'UP' and index > 0:
-            elems.move(index, index - 1)
-            scene.bufferio_elements_index = index - 1
-        elif self.direction == 'DOWN' and index < len(elems) - 1:
-            elems.move(index, index + 1)
-            scene.bufferio_elements_index = index + 1
-        return {'FINISHED'}
-
-
-class BUFFERIO_OT_validate_all(bpy.types.Operator):
-    """手动触发步长/偏移校验，高亮异常列表项（仅提示不影响导入）"""
-    bl_idname = 'bufferio.validate_all'
-    bl_label = 'Validate Stride/Offset'
-    bl_options = {'REGISTER'}
-
-    def execute(self, context):
-        result = validate_entries(context.scene.bufferio_elements)
-        self.report({'INFO'},
-                    f'Validation finished: {result["red"]} ERROR item(s) (stride mismatch / out of bounds / semantic conflict), '
-                    f'{result["yellow"]} QUESTION item(s) (discontinuous offset layout)')
-        if result['missing']:
-            self.report({'WARNING'}, f'Missing required semantic: {", ".join(result["missing"])}')
-        return {'FINISHED'}
-
-
-class BUFFERIO_OT_save_semantics(bpy.types.Operator):
-    """把当前 FMT 模式元素配置保存为预设（不含文件路径）"""
-    bl_idname = 'bufferio.save_semantics'
-    bl_label = 'Save Semantic Preset'
-    bl_options = {'REGISTER'}
-
-    name: StringProperty(name='Preset Name', default='')
-    node_name: StringProperty(name='Node', default='')
-
-    def invoke(self, context, event):
-        return context.window_manager.invoke_props_dialog(self)
-
-    def draw(self, context):
-        layout = self.layout
-        layout.prop(self, 'name')
-        layout.label(text=f'Save location: {SEMANTICS_DIR}')
-
-    def execute(self, context):
-        name = self.name.strip()
-        if not name:
-            self.report({'ERROR'}, 'Please enter a preset name')
-            return {'CANCELLED'}
-        elems, node = _preset_target(context, self.node_name)
-        if elems is None:
-            self.report({'ERROR'}, 'VB ELEMENT DESC node not found')
-            return {'CANCELLED'}
-        preset = []
-        for e in elems:
-            preset.append({
-                'name': e.name,
-                'enabled': e.enabled,
-                'semantic_name': e.semantic_name,
-                'semantic': e.semantic,
-                'semantic_index': e.semantic_index,
-                'index': e.index,
-                'format': e.format,
-                'input_slot': e.input_slot,
-                'offset': e.offset,
-                'stride': e.stride,
-                'count': e.count,
-            })
-        try:
-            SEMANTICS_DIR.mkdir(parents=True, exist_ok=True)
-            with open(SEMANTICS_DIR / f'{name}.json', 'w', encoding='utf-8') as f:
-                json.dump(preset, f, ensure_ascii=False, indent=2)
-        except Exception as exc:
-            self.report({'ERROR'}, f'Save failed: {exc}')
-            return {'CANCELLED'}
-        self.report({'INFO'}, f'Saved preset with {len(preset)} elements: {name}')
-        return {'FINISHED'}
-
-
-class BUFFERIO_OT_load_semantics(bpy.types.Operator):
-    """从插件本地加载 FMT 元素预设并重建元素列表（不含文件路径）"""
-    bl_idname = 'bufferio.load_semantics'
-    bl_label = 'Load Semantic Preset'
-    bl_options = {'REGISTER', 'UNDO'}
-
-    scheme: EnumProperty(name='Preset', items=lambda self, context: _preset_items())
-    node_name: StringProperty(name='Node', default='')
-
-    def invoke(self, context, event):
-        return context.window_manager.invoke_props_dialog(self)
-
-    def draw(self, context):
-        layout = self.layout
-        layout.prop(self, 'scheme')
-
-    def execute(self, context):
-        if not self.scheme:
-            self.report({'ERROR'}, 'No preset available')
-            return {'CANCELLED'}
-        try:
-            with open(SEMANTICS_DIR / f'{self.scheme}.json', 'r', encoding='utf-8') as f:
-                preset = json.load(f)
-        except Exception as exc:
-            self.report({'ERROR'}, f'Load failed: {exc}')
-            return {'CANCELLED'}
-        if not isinstance(preset, list):
-            self.report({'ERROR'}, f'Incompatible preset format: {self.scheme}')
-            return {'CANCELLED'}
-
-        valid_sem = {i[0] for i in ELEMENT_SEMANTIC_ITEMS}
-        valid_fmt = set(dxgi.SUPPORTED_FORMATS)
-        elems, node = _preset_target(context, self.node_name)
-        if elems is None:
-            self.report({'ERROR'}, 'VB ELEMENT DESC node not found')
-            return {'CANCELLED'}
-        # 保留现有文件路径，加载预设后按索引恢复（预设本身不含路径）
-        old_paths = [(e.filepath, e.ib_txt) for e in elems]
-        if node is not None:
-            node['syncing'] = True  # 避免应用预设时逐项回写内部节点
-        try:
-            elems.clear()
-            for i, d in enumerate(preset):
-                e = elems.add()
-                _assign_id(elems, e)
-                e.enabled = bool(d.get('enabled', True))
-                e.name = d.get('name', d.get('label', ''))
-                e.semantic_name = d.get('semantic_name', '')
-                if d.get('semantic') in valid_sem:
-                    e.semantic = d['semantic']
-                e.semantic_index = int(d.get('semantic_index', 0))
-                e.index = int(d.get('index', 0))
-                if d.get('format') in valid_fmt:
-                    e.format = d['format']
-                elif not e.format:
-                    e.format = 'R32G32B32_FLOAT'  # 预设无有效格式时兜底
-                e.input_slot = int(d.get('input_slot', 0))
-                e.offset = int(d.get('offset', 0))
-                e.stride = int(d.get('stride', 0))
-                e.count = int(d.get('count', 0))
-                if i < len(old_paths):
-                    e.filepath = old_paths[i][0]
-                    e.ib_txt = old_paths[i][1]
-            if node is not None:
-                node.elements_index = 0
-        finally:
-            if node is not None:
-                del node['syncing']
-                from .nodes.element_desc import rebuild_internal
-                # 预设直接修改内部节点：按新元素配置重建内部节点组
-                rebuild_internal(node)
-                node['bufferio_initialized'] = True
-        if node is None:
-            context.scene.bufferio_elements_index = 0
-        self.report({'INFO'}, f'Loaded preset with {len(elems)} elements: {self.scheme}')
-        return {'FINISHED'}
-
-
-def _preset_target(context, node_name):
-    """预设操作对象：VB ELEMENT DESC 节点的元素集合，或场景元素集合"""
-    if node_name:
-        tree, node = _get_desc_node(context, node_name)
-        if node is None:
-            return None, None
-        return node.elements, node
-    return context.scene.bufferio_elements, None
-
-
-def _preset_items():
-    items = []
-    if SEMANTICS_DIR.is_dir():
-        for path in sorted(SEMANTICS_DIR.glob('*.json')):
-            items.append((path.stem, path.stem, str(path)))
-    if not items:
-        items.append(('', '(No saved preset)', ''))
-    return items
-
-
-# --- 侧面板：加载 FMT / 导入 -----------------------------------------------
-
-class BUFFERIO_OT_load_fmt(bpy.types.Operator):
-    bl_idname = 'bufferio.load_fmt'
-    bl_label = 'Load FMT'
-    bl_options = {'REGISTER', 'UNDO'}
-
-    filepath: StringProperty(subtype='FILE_PATH')
-    filter_glob: StringProperty(default='*.fmt;*.txt;*.buf', options={'HIDDEN'})
-    shapekey_mode: EnumProperty(
-        name='Shape Key Search',
-        items=[
-            ('NONE', 'None', 'Do not search for shape keys'),
-            ('WUWA', 'WuWa', 'WuWa (Wuthering Waves): locate shape key CS calls through a vb6 file with the same prefix, and add SHAPEKEY elements automatically'),
-        ],
-        default='NONE',
-    )
-    bone_matrix_tag: StringProperty(
-        name='Bone Matrix',
-        description='Resource tag (e.g. vs-cb4); after loading, the bone matrix of the same draw call is searched and a BONEMATRIX element is added automatically',
-        default='',
-    )
-    fill_paths_by_tag: BoolProperty(
-        name='Fill Paths by Tag',
-        description='When enabled, the layout is not parsed; element file paths are filled by filename prefix only (no txt header needed, .buf files can be selected directly). Elements must already exist (add them manually or load a semantic preset)',
-        default=False,
-    )
-
-    def invoke(self, context, event):
-        context.window_manager.fileselect_add(self)
-        return {'RUNNING_MODAL'}
-
-    def execute(self, context):
-        scene = context.scene
-        scene.bufferio_fmt_path = self.filepath
-        fmt_path = Path(bpy.path.abspath(self.filepath))
-
-        if not fmt_path.is_file():
-            self.report({'ERROR'}, f'FMT file not found: {fmt_path}')
-            return {'CANCELLED'}
-
-        # 按tag填路径：不解析布局，仅按前缀填充已有元素的路径
-        if self.fill_paths_by_tag:
-            return self._fill_paths_by_tag(context, fmt_path)
-
-        try:
-            info, ib = parse_fmt_elements(scene.bufferio_elements, fmt_path)
-        except Exception as e:
-            self.report({'ERROR'}, str(e))
-            return {'CANCELLED'}
-
-        scene.bufferio_ib_file = ib['file']
-        scene.bufferio_ib_format = ib['format']
-        scene.bufferio_ib_offset = ib['offset']
-        scene.bufferio_ib_first = ib['first']
-        scene.bufferio_ib_count = ib['count']
-        scene.bufferio_fmt_info = info
-
-        result = validate_entries(scene.bufferio_elements)
-        if result['missing']:
-            self.report({'WARNING'}, f'Missing required semantic: {", ".join(result["missing"])}')
-
-        # wuwa 形态键搜索：自动添加并填入 SHAPEKEY 元素
-        if self.shapekey_mode == 'WUWA':
-            dash = fmt_path.name.find('-')
-            if dash <= 0:
-                self.report({'WARNING'}, 'WuWa: cannot identify the FrameAnalysis prefix from the FMT filename')
-            else:
-                mapping = wuwa_shapekey_map(fmt_path.parent, fmt_path.name[:dash],
-                                            self.report)
-                if mapping:
-                    # 形态键数据默认格式（可手动调整）
-                    default_format = {
-                        'SHAPEKEY_OFFSET': 'R32_UINT',
-                        'SHAPEKEY_VERTEXID': 'R32_UINT',
-                        'SHAPEKEY_VERTEXOFFSET': 'R16G16B16_FLOAT',
-                    }
-                    added = 0
-                    for slot in sorted(mapping):
-                        for semantic, p in mapping[slot].items():
-                            item = scene.bufferio_elements.add()
-                            _assign_id(scene.bufferio_elements, item)
-                            item.enabled = True
-                            item.semantic_name = semantic
-                            item.semantic = semantic
-                            item.semantic_index = slot
-                            item.index = slot
-                            if default_format.get(semantic) in dxgi.SUPPORTED_FORMATS:
-                                item.format = default_format[semantic]
-                            item.name = f'{semantic} {slot}'
-                            item.filepath = str(p)
-                            added += 1
-                    self.report({'INFO'}, f'WuWa shape keys: added {added} elements')
-
-        # 骨骼矩阵：填写 tag（如 vs-cb4）后自动查找同 draw call 的骨骼矩阵
-        tag = self.bone_matrix_tag.strip()
-        if tag:
-            dash = fmt_path.name.find('-')
-            if dash <= 0:
-                self.report({'WARNING'}, 'Cannot identify the FrameAnalysis prefix from the FMT filename')
-            else:
-                prefix = fmt_path.name[:dash]
-                matches = sorted(fmt_path.parent.glob(f'{prefix}-{tag}=*.buf'))
-                if not matches:
-                    self.report({'WARNING'}, f'Bone matrix not found: {prefix}-{tag}=*.buf')
-                else:
-                    item = scene.bufferio_elements.add()
-                    _assign_id(scene.bufferio_elements, item)
-                    item.enabled = True
-                    item.semantic_name = 'BONEMATRIX'
-                    item.semantic = 'BONEMATRIX'
-                    item.index = 0
-                    if 'MATRIX3X4_FLOAT' in dxgi.SUPPORTED_FORMATS:
-                        item.format = 'MATRIX3X4_FLOAT'
-                    item.stride = 0
-                    item.offset = 0
-                    item.filepath = str(matches[0])
-                    auto = _auto_export_name(str(matches[0]))
-                    item.name = auto if auto else tag
-                    self.report({'INFO'}, f'Bone matrix: {matches[0].name}')
-
-        self.report({'INFO'}, info)
-        return {'FINISHED'}
-
-    def _fill_paths_by_tag(self, context, fmt_path):
-        """按资源 tag 自动填充已有元素的文件路径（不解析布局，无需 txt 头部）
-
-        从所选文件名提取前缀，扫描同前缀资源，按 input_slot 填入 vb 槽位、
-        按 INDEX 语义填入 ib；并同步解析对应 txt 头部的 byte offset / first / count。
-        元素需已存在（手动添加或加载语义预设），不清空、不重建元素列表。
-        """
-        prefix = fmt_path.name.split('-', 1)[0]
-        if '-' not in fmt_path.name or not prefix:
-            self.report({'ERROR'}, 'Cannot identify the FrameAnalysis prefix from the filename')
-            return {'CANCELLED'}
-
-        found = {}
-        for f in sorted(fmt_path.parent.glob(f'{prefix}-*')):
-            if not f.is_file():
-                continue
-            rest = f.name[len(prefix) + 1:]
-            tag = rest.split('=', 1)[0]
-            if tag:
-                found.setdefault(tag, []).append(f)
-
-        def fill(element):
-            """按元素的槽位/语义匹配资源 tag，返回是否填入"""
-            if element.semantic == 'INDEX' or element.input_slot == -1:
-                tag = 'ib'
-            elif element.input_slot >= 0:
-                tag = f'vb{element.input_slot}'
-            else:
-                return False
-            candidates = found.get(tag)
-            if not candidates:
-                return False
-            buf = next((p for p in candidates if p.suffix.lower() == '.buf'),
-                       candidates[0])
-            txt = next((p for p in candidates if p.suffix.lower() == '.txt'), None)
-            element.filepath = str(buf)
-            if txt is not None:
-                try:
-                    from . import fmt_parser
-                    header = fmt_parser.parse_fmt_file(txt)
-                    if tag == 'ib':
-                        element.ib_txt = str(txt)
-                        element.first_index = header.first_index
-                        element.index_count = header.index_count
-                    element.byte_offset = header.byte_offset
-                except Exception:
-                    pass
-            return True
-
-        applied = sum(1 for e in context.scene.bufferio_elements
-                      if e.enabled and fill(e))
-
-        # wuwa 形态键：按语义+索引填入 SHAPEKEY 元素
-        extra = 0
-        if self.shapekey_mode == 'WUWA':
-            mapping = wuwa_shapekey_map(fmt_path.parent, prefix, self.report)
-            if mapping:
-                for slot, sem_map in mapping.items():
-                    for semantic, p in sem_map.items():
-                        for e in context.scene.bufferio_elements:
-                            if e.enabled and e.semantic == semantic \
-                                    and e.index == slot:
-                                e.filepath = str(p)
-                                extra += 1
-                                break
-
-        self.report({'INFO'},
-                    f'Prefix {prefix}: found {len(found)} resource kinds, filled {applied} paths'
-                    + (f', WuWa shape keys {extra}' if extra else ''))
-        return {'FINISHED'}
-
-
-class BUFFERIO_OT_import_fmt(bpy.types.Operator):
-    bl_idname = 'bufferio.import_fmt'
-    bl_label = 'Import (FMT Mode)'
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        scene = context.scene
-        elements = [e for e in scene.bufferio_elements
-                    if e.enabled and e.semantic != 'SKIP']
-        if not elements:
-            self.report({'ERROR'}, 'No enabled elements; load an FMT file first')
-            return {'CANCELLED'}
-
-        result = validate_entries(scene.bufferio_elements)
-        if result['missing']:
-            self.report({'WARNING'}, f'Missing required semantic: {", ".join(result["missing"])}')
-        try:
-            # 索引缓冲（INDEX 项）与顶点属性统一由元素列表收集
-            faces, arrays = collect_vertex_arrays(elements)
-            if faces is None and scene.bufferio_ib_file:
-                # 兜底：元素列表中无 INDEX 项时使用独立索引设置
-                if Path(scene.bufferio_ib_file).suffix.lower() == '.txt':
-                    faces = buffer_io.read_indices_from_ib_txt(scene.bufferio_ib_file)
-                else:
-                    faces = buffer_io.read_indices(
-                        scene.bufferio_ib_file, scene.bufferio_ib_format,
-                        offset=scene.bufferio_ib_offset,
-                        first=scene.bufferio_ib_first, count=scene.bufferio_ib_count)
-
-            # 网格名取 INDEX 文件名；骨架名优先取 BONEMATRIX 元素文件名（骨骼矩阵文件）
-            index_path = next(
-                (e.filepath or e.ib_txt for e in elements
-                 if e.semantic == 'INDEX' and (e.filepath or e.ib_txt)), None)
-            if not index_path and scene.bufferio_ib_file:
-                index_path = scene.bufferio_ib_file
-            mesh_name = Path(index_path).name if index_path \
-                else (Path(scene.bufferio_fmt_path).stem or 'BufferIO_FMT')
-            bone_path = next(
-                (e.filepath for e in elements
-                 if e.semantic == 'BONEMATRIX' and e.filepath), None)
-            arm_name = Path(bone_path).name if bone_path \
-                else (Path(scene.bufferio_fmt_path).name or None)
-
-            obj = build_and_link(
-                context, mesh_name, faces, arrays,
-                scene.bufferio_flip_winding, scene.bufferio_flip_texcoord_v,
-                scale=scene.bufferio_global_scale,
-                mirror_x=scene.bufferio_mirror_x,
-                axis_forward=scene.bufferio_axis_forward,
-                axis_up=scene.bufferio_axis_up,
-                armature_name=arm_name)
-        except Exception as e:
-            self.report({'ERROR'}, str(e))
-            return {'CANCELLED'}
-
-        self.report({'INFO'},
-                    f'Import finished: {len(obj.data.vertices)} vertices, {len(obj.data.polygons)} faces')
-        return {'FINISHED'}
-
-
-# --- 节点编辑器：VB ELEMENT DESC / 一键装配 / 一键导入 ----------------------
-
-def _active_node_tree(context):
-    from .nodes.ui import _active_tree
-    return _active_tree(context)
-
-
-def _get_desc_node(context, node_name):
-    tree = _active_node_tree(context)
-    node = tree.nodes.get(node_name) if tree is not None else None
-    if node is None or node.bl_idname != 'BufferIOSourceFile':
-        return None, None
-    return tree, node
-
-
-def _insert_mesh_stage(tree, target, node, x, y):
+def _insert_mesh_stage(tree, target, node):
     """把 node 插入到 target 的 Mesh 输入之前，保留已存在的上游连线"""
     socket = target.inputs.get('Mesh')
     upstream = None
@@ -598,206 +173,194 @@ def _insert_mesh_stage(tree, target, node, x, y):
         link = socket.links[0]
         upstream = (link.from_node, link.from_socket)
         tree.links.remove(link)
-    node.location = (x, y)
     if upstream is not None:
         tree.links.new(upstream[1], node.inputs['Mesh'])
     if socket is not None:
         tree.links.new(node.outputs['Mesh'], socket)
 
 
-def _build_graph(tree, source, report=None):
-    """从 VB ELEMENT DESC 节点生成导入链：网格直接接到 Import 节点。
-
-    资源描述节点内部已把元素装配成单个网格，骨骼矩阵 / 形态键由
-    Bone Matrix / Shape Key Assemble 等独立节点处理。
-    返回 Import 节点（后续处理节点插入到它的 Mesh 输入之前）。
-    """
-    def warn(msg):
-        if report is not None:
-            report({'WARNING'}, msg)
-
-    removed = 0
-    for node in list(tree.nodes):
-        if node.bl_idname in CHAIN_NODES:
-            tree.nodes.remove(node)
-            removed += 1
-    if removed:
-        warn(f'Removed {removed} old assemble chain node(s)')
-
-    if source.outputs.get('Mesh') is None:
-        # 旧文件迁移：端口协议变更后按内部节点重建单个 Mesh 输出
-        from .nodes.element_desc import sync_ports
-        sync_ports(source)
-
-    x0, y0 = source.location.x, source.location.y
-    output = tree.nodes.new('BufferIOOutput')
-    output.location = (x0 + NODE_GAP_X, y0)
-    tree.links.new(source.outputs['Mesh'], output.inputs['Mesh'])
-    return output
-
-
-def _add_shapekey_nodes(tree, source, target, fmt_path, report):
-    """wuwa 形态键：自动发现并创建形态键节点，逐组插入 Shape Key Apply"""
-    dash = fmt_path.name.find('-')
-    if dash <= 0:
-        report({'WARNING'}, 'WuWa: cannot identify the FrameAnalysis prefix from the FMT filename')
-        return 0
-    mapping = wuwa_shapekey_map(fmt_path.parent, fmt_path.name[:dash], report)
+def _add_shapekey_nodes(tree, frame, target, directory, prefix, report, x, y):
+    """wuwa 形态键：按 draw id 前缀自动发现并创建一个多槽位的形态键装配节点"""
+    mapping = wuwa_shapekey_map(Path(directory), prefix, report)
     if not mapping:
         return 0
-    x0, y0 = source.location.x, source.location.y
+
+    # 每组形态键一个槽位：ShapeKey Resource -> SHAPEKEY[i]
+    stage = tree.nodes.new('BufferIOShapeKeyApply')
+    stage.shape_count = len(mapping)
+    stage.rebuild_sockets()
+    _insert_mesh_stage(tree, target, stage)
+    _layout(stage, frame, x + NODE_GAP_X, y)
     for slot, sem_map in sorted(mapping.items()):
         node = tree.nodes.new('BufferIOShapeKey')
-        node.location = (x0 + NODE_GAP_X * 2, y0 - NODE_GAP_Y * (2 + slot))
+        _layout(node, frame, x, y - NODE_GAP_Y * (2 + slot))
         if 'SHAPEKEY_OFFSET' in sem_map:
-            node.offsets_file = str(sem_map['SHAPEKEY_OFFSET'])
+            node.set_socket_default('Offsets File', str(sem_map['SHAPEKEY_OFFSET']))
         if 'SHAPEKEY_VERTEXID' in sem_map:
-            node.ids_file = str(sem_map['SHAPEKEY_VERTEXID'])
+            node.set_socket_default('IDs File', str(sem_map['SHAPEKEY_VERTEXID']))
         if 'SHAPEKEY_VERTEXOFFSET' in sem_map:
-            node.vecs_file = str(sem_map['SHAPEKEY_VERTEXOFFSET'])
-        # 每组形态键一个应用节点，按槽位顺序串联在网格链上
-        stage = tree.nodes.new('BufferIOShapeKeyApply')
-        _insert_mesh_stage(tree, target, stage,
-                           x0 + NODE_GAP_X, y0 - NODE_GAP_Y * (2 + slot))
-        tree.links.new(node.outputs['ShapeKey'], stage.inputs['ShapeKey'])
+            node.set_socket_default('Vectors File', str(sem_map['SHAPEKEY_VERTEXOFFSET']))
+        tree.links.new(node.outputs['ShapeKey'],
+                       stage.inputs[f'SHAPEKEY[{slot}]'])
     return len(mapping)
 
 
-def _add_bone_matrix_node(tree, source, target, fmt_path, tag, report):
-    """骨骼矩阵：按资源 tag（如 vs-cb4）查找同 draw call 的矩阵文件并接到 Import 的 Matrix 输入"""
-    dash = fmt_path.name.find('-')
-    if dash <= 0:
-        report({'WARNING'}, 'Cannot identify the FrameAnalysis prefix from the FMT filename')
-        return
-    prefix = fmt_path.name[:dash]
-    matches = sorted(fmt_path.parent.glob(f'{prefix}-{tag}=*.buf'))
+def _add_bone_matrix_node(tree, frame, target, directory, prefix, tag, report, x, y):
+    """骨骼矩阵：按资源 tag（如 vs-cb6）在同 drawcall 组内查找矩阵文件并接到 Import 的 Matrix 输入"""
+    matches = sorted(Path(directory).glob(f'{prefix}-{tag}=*.buf'))
     if not matches:
         report({'WARNING'}, f'Bone matrix not found: {prefix}-{tag}=*.buf')
         return
     node = tree.nodes.new('BufferIOBoneMatrix')
-    node.location = (source.location.x + NODE_GAP_X,
-                     source.location.y - NODE_GAP_Y * 5)
-    node.filepath = str(matches[0])
+    _layout(node, frame, x, y - NODE_GAP_Y * 6)
+    node.set_socket_default('File', str(matches[0]))
     auto = _auto_export_name(str(matches[0]))
     node.name = auto if auto else tag
     tree.links.new(node.outputs['Matrix'], target.inputs['Matrix'])
     report({'INFO'}, f'Bone matrix: {matches[0].name}')
 
 
-class BUFFERIO_OT_node_source_refresh(Operator):
-    """重新解析 VB ELEMENT DESC 节点的资源文件，刷新元素列表与输出端口"""
-    bl_idname = 'bufferio.node_source_refresh'
-    bl_label = 'Re-parse'
-    bl_options = {'REGISTER', 'UNDO'}
-
-    node_name: StringProperty(name='Node')
-
-    def execute(self, context):
-        tree, node = _get_desc_node(context, self.node_name)
-        if node is None:
-            self.report({'ERROR'}, 'VB ELEMENT DESC node not found')
-            return {'CANCELLED'}
-        from .nodes.element_desc import parse_node
-        parse_node(node)
-        if node.get('info', '').startswith('Parse failed'):
-            self.report({'ERROR'}, node.get('info'))
-            return {'CANCELLED'}
-        return {'FINISHED'}
+def _active_node_tree(context):
+    from .nodes.ui import _active_tree
+    return _active_tree(context)
 
 
-class BUFFERIO_OT_node_element_add(Operator):
-    """为 VB ELEMENT DESC 节点手动添加元素"""
-    bl_idname = 'bufferio.node_element_add'
-    bl_label = 'Add Element'
-    bl_options = {'REGISTER', 'UNDO'}
+def _scan_drawcalls(folder):
+    """扫描文件夹内所有 drawcall 分组
 
-    node_name: StringProperty(name='Node')
+    每个分组：{'ib_txt','ib_hash','first','count','vb_hashes','vb_txts'}
+    目录只遍历一次：vb 的 hash 与 txt 头部文件在这里一并收集，
+    避免后续每个 draw id 各做一次 glob。
+    """
+    vb_hashes = {}
+    vb_txts = {}
+    for entry in folder.iterdir():
+        if not entry.is_file():
+            continue
+        match = VB_FILE_RE.match(entry.name)
+        if match is None:
+            continue
+        draw_id = match.group(1)
+        vb_hashes.setdefault(draw_id, set()).add(match.group(2).lower())
+        if entry.suffix.lower() == '.txt':
+            vb_txts.setdefault(draw_id, []).append(entry)
 
-    def execute(self, context):
-        tree, node = _get_desc_node(context, self.node_name)
-        if node is None:
-            self.report({'ERROR'}, 'VB ELEMENT DESC node not found')
-            return {'CANCELLED'}
-        item = node.elements.add()
-        _assign_id(node.elements, item)
-        item.enabled = True
-        item.name = 'Custom Element'
-        item.format = 'R32G32B32_FLOAT'
-        node.elements_index = len(node.elements) - 1
-        from .nodes.element_desc import rebuild_internal
-        rebuild_internal(node)
-        node['bufferio_initialized'] = True
-        return {'FINISHED'}
-
-
-class BUFFERIO_OT_node_element_remove(Operator):
-    """移除 VB ELEMENT DESC 节点当前选中元素"""
-    bl_idname = 'bufferio.node_element_remove'
-    bl_label = 'Remove Element'
-    bl_options = {'REGISTER', 'UNDO'}
-
-    node_name: StringProperty(name='Node')
-
-    def execute(self, context):
-        tree, node = _get_desc_node(context, self.node_name)
-        if node is None:
-            self.report({'ERROR'}, 'VB ELEMENT DESC node not found')
-            return {'CANCELLED'}
-        index = node.elements_index
-        if 0 <= index < len(node.elements):
-            node.elements.remove(index)
-            node.elements_index = min(index, len(node.elements) - 1)
-        from .nodes.element_desc import rebuild_internal
-        rebuild_internal(node)
-        node['bufferio_initialized'] = True
-        return {'FINISHED'}
+    groups = {}
+    for txt in sorted(folder.glob('*-ib=*.txt')):
+        match = IB_TXT_RE.match(txt.name)
+        if match is None:
+            continue
+        draw_id, ib_hash = match.group(1), match.group(2)
+        try:
+            header = fmt_parser.parse_fmt_file(txt)
+        except Exception:
+            continue  # 无法解析头部的 ib txt 跳过
+        groups[draw_id] = {'ib_txt': txt, 'ib_hash': ib_hash.lower(),
+                           'first': header.first_index,
+                           'count': header.index_count,
+                           'vb_hashes': vb_hashes.get(draw_id, set()),
+                           'vb_txts': sorted(vb_txts.get(draw_id, []))}
+    return groups
 
 
-class BUFFERIO_OT_node_build_graph(Operator):
-    """从 VB ELEMENT DESC 节点生成烘焙链：网格装配 + Import"""
-    bl_idname = 'bufferio.node_build_graph'
-    bl_label = 'Assemble Graph'
-    bl_options = {'REGISTER', 'UNDO'}
-
-    node_name: StringProperty(name='Node')
-
-    def execute(self, context):
-        tree, node = _get_desc_node(context, self.node_name)
-        if node is None:
-            self.report({'ERROR'}, 'VB ELEMENT DESC node not found')
-            return {'CANCELLED'}
-        _build_graph(tree, node, self.report)
-        self.report({'INFO'}, 'Import chain created; click the Import node button to import the model')
-        return {'FINISHED'}
+def _find_layout_txt(candidates):
+    """在已收集的 vb txt 中找含 IA 布局定义（element[]）的文件"""
+    for txt in candidates:
+        try:
+            if fmt_parser.parse_fmt_file(txt).elements:
+                return txt
+        except Exception:
+            continue
+    return None
 
 
 class BUFFERIO_OT_node_import_fmt(Operator):
-    """选择 FMT / FrameAnalysis 文件，生成 VB ELEMENT DESC 节点与装配链"""
+    """选择 FrameAnalysis dump 文件夹，按 drawcall 分组批量生成 VB / Index / Assemble / Import 节点"""
     bl_idname = 'bufferio.node_import_fmt'
-    bl_label = 'Import from FMT'
-    bl_options = {'REGISTER', 'UNDO'}
+    bl_label = 'FrameAnalysis Import'
+    # 'PRESET'：文件对话框右侧自动绘制原生操作项预设行
+    # （WM_MT_operator_presets 下拉 + 添加/移除，见 template_operator_property）
+    bl_options = {'REGISTER', 'UNDO', 'PRESET'}
 
-    filepath: StringProperty(subtype='FILE_PATH')
-    filter_glob: StringProperty(default='*.fmt;*.txt;*.buf', options={'HIDDEN'})
-    shapekey_mode: EnumProperty(
-        name='Shape Key Search',
-        items=[
-            ('NONE', 'None', 'Do not search for shape keys'),
-            ('WUWA', 'WuWa', 'WuWa (Wuthering Waves): locate shape key CS calls through a vb6 file with the same prefix, and add shape key nodes automatically'),
-        ],
-        default='NONE',
+    game: EnumProperty(
+        name='Game', items=GAME_ITEMS, default='WUWA',
+        description='Layout rules used to interpret the FrameAnalysis folder')
+    # 文件夹选择：use_filter_folder 让文件浏览器进入目录模式，结果写入 directory
+    directory: StringProperty(
+        name='Folder', subtype='DIR_PATH', options={'HIDDEN', 'SKIP_SAVE'})
+    filepath: StringProperty(
+        name='Path', subtype='DIR_PATH', options={'HIDDEN', 'SKIP_SAVE'})
+    use_filter_folder: BoolProperty(default=True, options={'HIDDEN', 'SKIP_SAVE'})
+    filter_glob: StringProperty(default='*', options={'HIDDEN', 'SKIP_SAVE'})
+    use_mapping: BoolProperty(
+        name='Semantic Mapping',
+        default=False,
+        description='Map the fmt semantics by the list below instead of '
+                    'guessing from the SemanticName',
+    )
+    attributes: CollectionProperty(
+        name='Attributes',
+        type=BUFFERIO_AttributeItem,
+        description='Mapping from (Semantic Name, Semantic Index) in the fmt '
+                    'to the target semantic and index',
+    )
+    search_shape_keys: BoolProperty(
+        name='Search Shape Keys',
+        default=False,
+        description='Search WuWa shape key CS calls through the vb6 hash and '
+                    'add shape key nodes automatically',
     )
     bone_matrix_tag: StringProperty(
         name='Bone Matrix Tag',
-        description='Resource tag (e.g. vs-cb4); the bone matrix of the same draw call is searched automatically and a bone matrix node is added',
-        default='',
+        description='Resource tag (e.g. vs-cb6); the bone matrix of the same draw call is searched automatically and a bone matrix node is added',
+        default='vs-cb6',
     )
 
     def invoke(self, context, event):
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
 
+    def draw(self, context):
+        """文件对话框右侧面板：全部可调选项（预设行由 Blender 自动绘制）"""
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        col = layout.column(align=True)
+        col.prop(self, 'game')
+        col.prop(self, 'use_mapping')
+        col.prop(self, 'search_shape_keys')
+        col.prop(self, 'bone_matrix_tag')
+
+        if not self.use_mapping:
+            return
+        layout.use_property_split = False
+        box = layout.box()
+        row = box.row(align=True)
+        row.label(text='Source')
+        row.label(text='Target')
+        for item in self.attributes:
+            row = box.row(align=True)
+            row.prop(item, 'semantic_name', text='')
+            row.prop(item, 'semantic_index', text='')
+            row.label(icon='ARROW_LEFTRIGHT')
+            row.prop(item, 'semantic', text='')
+            row.prop(item, 'target_index', text='')
+        row = box.row(align=True)
+        op = row.operator('bufferio.import_fmt_attribute',
+                          text='Attribute', icon='ADD')
+        op.index = len(self.attributes)
+        op.delta = 1
+        op = row.operator('bufferio.import_fmt_attribute',
+                          text='Attribute', icon='REMOVE')
+        op.index = max(0, len(self.attributes) - 1)
+        op.delta = -1
+
     def execute(self, context):
+        if self.game != 'WUWA':
+            self.report({'ERROR'}, f'Unsupported game: {self.game}')
+            return {'CANCELLED'}
+
         tree = _active_node_tree(context)
         if tree is None:
             tree = bpy.data.node_groups.new('BufferIO', 'BufferIONodeTree')
@@ -806,50 +369,162 @@ class BUFFERIO_OT_node_import_fmt(Operator):
             if scene is not None:
                 scene.bufferio_node_tree = tree
 
-        fmt_path = Path(bpy.path.abspath(self.filepath))
-        if not fmt_path.is_file():
-            self.report({'ERROR'}, f'File not found: {fmt_path}')
+        folder = Path(bpy.path.abspath(self.directory or self.filepath))
+        if not folder.is_dir():
+            self.report({'ERROR'}, f'Folder not found: {folder}')
             return {'CANCELLED'}
 
-        node = tree.nodes.new('BufferIOSourceFile')
-        node.location = (0.0, 0.0)
-        node.filepath = self.filepath  # update 回调自动解析
-
-        if not node.elements:
-            self.report({'ERROR'}, node.get('info') or 'Parse failed: no elements')
-            tree.nodes.remove(node)
+        # 按 drawcall 分组扫描；ib hash + first/count + 全部 vb hash 相同视为重复
+        # （vb 只看 hash，骨骼矩阵 vs-cb* 不参与去重）
+        groups = _scan_drawcalls(folder)
+        if not groups:
+            self.report({'ERROR'}, f'No ib txt found in: {folder}')
             return {'CANCELLED'}
 
-        chain = _build_graph(tree, node, self.report)
+        seen = set()
+        ordered = []
+        for draw_id in sorted(groups, key=int):
+            group = groups[draw_id]
+            key = (group['ib_hash'], group['first'], group['count'],
+                   tuple(sorted(group['vb_hashes'])))
+            if key in seen:
+                self.report({'WARNING'},
+                            f'Skip drawcall {draw_id}: duplicate ib / vb hashes')
+                continue
+            seen.add(key)
+            ordered.append((draw_id, group))
 
-        if self.shapekey_mode == 'WUWA':
-            added = _add_shapekey_nodes(tree, node, chain, fmt_path,
-                                        self.report)
+        # 按 ib txt 的 first index 从小到大排序：顺序即 Component 0、Component 1……
+        ordered.sort(key=lambda item: (item[1]['first'], int(item[0])))
+
+        cursor = getattr(getattr(context, 'space_data', None),
+                         'cursor_location', None)
+        base_x = cursor.x if cursor is not None else 0.0
+        base_y = cursor.y if cursor is not None else 0.0
+
+        imported = 0
+        for index, (draw_id, group) in enumerate(ordered):
+            layout_txt = _find_layout_txt(group['vb_txts'])
+            if layout_txt is None:
+                self.report({'WARNING'},
+                            f'Drawcall {draw_id}: no vb txt with IA layout, skipped')
+                continue
+            elements = ElementList()
+            try:
+                parse_fmt_elements(elements, layout_txt)
+            except Exception as exc:
+                self.report({'WARNING'},
+                            f'Drawcall {draw_id}: parse failed ({exc}), skipped')
+                continue
+            if self.use_mapping:
+                apply_attribute_mapping(elements, self.attributes)
+
+            offset = base_x + index * GROUP_SPACING
+            frame = tree.nodes.new('NodeFrame')
+            frame.label = f'{draw_id} ib={group["ib_hash"]}'
+            frame.use_custom_color = True
+            frame.color = (0.15, 0.17, 0.23)
+            frame.location = (offset, base_y)
+
+            self._create_nodes(tree, frame, elements, offset, base_y,
+                               folder, draw_id, f'Component {imported}')
+            imported += 1
+
+        if imported == 0:
+            self.report({'ERROR'}, 'No drawcall imported')
+            return {'CANCELLED'}
+        self.report({'INFO'}, f'Imported {imported} drawcall group(s)')
+        self.report({'INFO'}, 'Click Import All in the sidebar to build the meshes')
+        return {'FINISHED'}
+
+    def _create_nodes(self, tree, frame, elements, base_x, base_y, directory,
+                      prefix, object_name):
+        """按解析结果创建节点并连线（directory + prefix 用于形态键/骨骼矩阵查找）"""
+        ib_elem = next((e for e in elements if e.semantic == 'INDEX'), None)
+        vb_elems = [e for e in elements
+                    if e.semantic != 'INDEX' and getattr(e, 'enabled', True)]
+
+        index_node = None
+        if ib_elem is not None:
+            index_node = tree.nodes.new('BufferIOIndexBuffer')
+            _layout(index_node, frame, NODE_GAP_X * 1.1, 0.0)
+            index_node.set_socket_default('File', ib_elem.filepath)
+            index_node.set_socket_default('Format', ib_elem.format)
+            index_node.set_socket_default(
+                'Byte Offset', int(getattr(ib_elem, 'byte_offset', 0)))
+            # ib txt 放在最后设置：其 update 回调会解析头部并覆盖格式/偏移
+            if getattr(ib_elem, 'ib_txt', ''):
+                index_node.ib_txt = ib_elem.ib_txt
+            else:
+                index_node.set_socket_default(
+                    'First Index', int(getattr(ib_elem, 'first_index', 0)))
+                index_node.set_socket_default(
+                    'Index Count', int(getattr(ib_elem, 'index_count', 0)))
+
+        vb_nodes = []
+        skipped = 0
+        for i, elem in enumerate(vb_elems):
+            node = tree.nodes.new('BufferIOGenericBuffer')
+            _layout(node, frame, 0.0, -NODE_GAP_Y * i)
+            node.set_socket_default('File', elem.filepath)
+            node.set_socket_default('Format', elem.format)
+            node.set_socket_default('Stride', int(getattr(elem, 'stride', 0)))
+            node.set_socket_default('Byte Offset', int(getattr(elem, 'byte_offset', 0)))
+            node.set_socket_default('Element Offset', int(getattr(elem, 'offset', 0)))
+            node.set_socket_default('Count', int(getattr(elem, 'count', 0)))
+
+            semantic = getattr(elem, 'semantic', 'SKIP')
+            index = int(getattr(elem, 'index', 0))
+            if semantic == 'SKIP' or semantic in EXCLUDED_SEMANTICS:
+                # 未识别/顶点缓冲不处理的语义：保留为静音节点，便于手动改语义后接线
+                skipped += 1
+                node.label = f'{elem.semantic_name or semantic} {index}'
+                node.mute = True
+            else:
+                node.semantic = semantic
+                node.semantic_index = index
+                node.label = semantic_title(semantic, index)
+                vb_nodes.append(node)
+
+        assemble = tree.nodes.new('BufferIOMeshAssemble')
+        assemble.array_count = max(1, len(vb_nodes))
+        assemble.rebuild_sockets()
+        _layout(assemble, frame, NODE_GAP_X * 2.5,
+                -NODE_GAP_Y * max(0, len(vb_elems) - 1) / 2.0)
+        for i, node in enumerate(vb_nodes):
+            tree.links.new(node.outputs['Array'],
+                           assemble.inputs[f'ELEMENT[{i}]'])
+        if index_node is not None:
+            tree.links.new(index_node.outputs['Index'],
+                           assemble.inputs['Index'])
+
+        mid_y = -NODE_GAP_Y * max(0, len(vb_elems) - 1) / 2.0
+
+        output = tree.nodes.new('BufferIOImport')
+        _layout(output, frame, NODE_GAP_X * 3.5, mid_y)
+        output.set_socket_default('Object Name', object_name)
+        tree.links.new(assemble.outputs['Mesh'], output.inputs['Mesh'])
+
+        if self.search_shape_keys:
+            added = _add_shapekey_nodes(tree, frame, output, directory,
+                                        prefix, self.report,
+                                        NODE_GAP_X * 3.5, mid_y)
             if added:
-                self.report({'INFO'}, f'WuWa shape keys: added {added} ShapeKey Assemble node(s)')
+                self.report({'INFO'},
+                            f'WuWa shape keys: {added} slot(s) on ShapeKey Assemble')
         tag = self.bone_matrix_tag.strip()
         if tag:
-            _add_bone_matrix_node(tree, node, chain, fmt_path, tag,
-                                  self.report)
+            _add_bone_matrix_node(tree, frame, output, directory, prefix,
+                                  tag, self.report, NODE_GAP_X * 3.5, mid_y)
 
-        self.report({'INFO'}, 'Node graph created; click the Import node button to import the model')
-        return {'FINISHED'}
+        if skipped:
+            self.report({'WARNING'},
+                        f'{skipped} 个未识别语义的元素已生成静音节点，可手动指定语义后连线')
+        tree.nodes.active = output
 
 
 CLASSES = (
-    # 侧面板
-    BUFFERIO_OT_element_add,
-    BUFFERIO_OT_element_remove,
-    BUFFERIO_OT_element_move,
-    BUFFERIO_OT_validate_all,
-    BUFFERIO_OT_save_semantics,
-    BUFFERIO_OT_load_semantics,
-    BUFFERIO_OT_load_fmt,
-    BUFFERIO_OT_import_fmt,
-    # 节点编辑器
-    BUFFERIO_OT_node_source_refresh,
-    BUFFERIO_OT_node_element_add,
-    BUFFERIO_OT_node_element_remove,
-    BUFFERIO_OT_node_build_graph,
+    BUFFERIO_AttributeItem,
+    BUFFERIO_OT_import_fmt_attribute,
     BUFFERIO_OT_node_import_fmt,
 )

@@ -1,6 +1,4 @@
-"""BufferIO 常量定义：语义枚举、坐标轴、目录、动态枚举辅助。"""
-
-from pathlib import Path
+"""BufferIO 常量定义：语义枚举、坐标轴、算法选项。"""
 
 
 # FMT 模式的语义枚举
@@ -79,5 +77,8 @@ AXIS_ITEMS = [
     ('-Z', '-Z', ''),
 ]
 
-# 语义预设保存目录：插件安装目录下（不随 .blend 工程变化）
-SEMANTICS_DIR = Path(__file__).resolve().parent / 'semantics'
+# 语义映射预设以 Blender 原生操作项预设形式分发：
+# presets/operator/bufferio_import_fmt/*.py（WuWa 预设由 __init__.py 注册路径后出现在
+# 「Import from FMT」右侧的下拉菜单中）。映射条目为 (SemanticName, SemanticIndex)
+# -> (semantic, target_index)，target_index 写入节点的 Semantic Index，
+# 并决定 BLENDINDICES/WEIGHTS 的拼接顺序。

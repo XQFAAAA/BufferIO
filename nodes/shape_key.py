@@ -2,9 +2,9 @@
 
 import bpy
 import numpy
-from bpy.props import EnumProperty, StringProperty
+from bpy.props import EnumProperty
 
-from .. import buffer_io, dxgi
+from .. import buffer_io
 from ..constants import ALGORITHM_ITEMS
 from .base import BufferIONode
 from .data import ShapeKeyData
@@ -17,50 +17,39 @@ class BUFFERIO_NODE_shape_key(BufferIONode):
     bl_icon = 'SHAPEKEY_DATA'
     CATEGORY_COLOR = (0.30, 0.26, 0.08)
 
-    offsets_file: StringProperty(name='Bounds', subtype='FILE_PATH')
-    ids_file: StringProperty(name='Vertex IDs', subtype='FILE_PATH')
-    vecs_file: StringProperty(name='Vectors', subtype='FILE_PATH')
-    offsets_format: EnumProperty(name='Bounds Format', items=dxgi.FORMAT_ENUM_ITEMS,
-                                 default='R32_UINT')
-    ids_format: EnumProperty(name='IDs Format', items=dxgi.FORMAT_ENUM_ITEMS,
-                             default='R32_UINT')
-    vecs_format: EnumProperty(name='Vectors Format', items=dxgi.FORMAT_ENUM_ITEMS,
-                              default='R16G16B16_FLOAT')
     # 形态键解码算法：当前仅「保持」，后续算法在 constants.ALGORITHM_ITEMS 追加
     algorithm: EnumProperty(name='Algorithm', items=ALGORITHM_ITEMS,
                             default='KEEP', description='Shape key decoding algorithm')
 
-    # 未连接时在输入端口上直接编辑属性
-    SOCKET_PROPERTIES = {
-        'Offsets File': 'offsets_file',
-        'IDs File': 'ids_file',
-        'Vectors File': 'vecs_file',
-        'Offsets Format': 'offsets_format',
-        'IDs Format': 'ids_format',
-        'Vectors Format': 'vecs_format',
+    # 覆盖输入 socket 的类默认值（仅列出与 socket 类默认不同的项）
+    SOCKET_DEFAULTS = {
+        'Offsets Format': 'R32_UINT',
+        'IDs Format': 'R32_UINT',
+        'Vectors Format': 'R16G16B16_FLOAT',
     }
 
     def init(self, context):
         super().init(context)
-        # 输入端：已连接时优先于节点属性
-        self.add_input('BufferIOSocketString', 'Offsets File')
-        self.add_input('BufferIOSocketString', 'IDs File')
-        self.add_input('BufferIOSocketString', 'Vectors File')
+        # 输入端：已连接时优先于 socket 默认值
+        self.add_input('BufferIOSocketFile', 'Offsets File')
+        self.add_input('BufferIOSocketFile', 'IDs File')
+        self.add_input('BufferIOSocketFile', 'Vectors File')
         self.add_input('BufferIOSocketFormat', 'Offsets Format')
         self.add_input('BufferIOSocketFormat', 'IDs Format')
         self.add_input('BufferIOSocketFormat', 'Vectors Format')
         self.add_output('BufferIOSocketShapeKey', 'ShapeKey')
+        self.init_socket_defaults()
 
     def evaluate(self, ctx):
-        offsets_file = self.input_string(ctx, 'Offsets File', self.offsets_file)
-        ids_file = self.input_string(ctx, 'IDs File', self.ids_file)
-        vecs_file = self.input_string(ctx, 'Vectors File', self.vecs_file)
+        offsets_file = self.input_string(ctx, 'Offsets File')
+        ids_file = self.input_string(ctx, 'IDs File')
+        vecs_file = self.input_string(ctx, 'Vectors File')
         if not (offsets_file and ids_file and vecs_file):
             raise ValueError('All three shape key data files must be specified')
 
-        offsets_format = self._format(ctx, 'Offsets Format', self.offsets_format)
-        ids_format = self._format(ctx, 'IDs Format', self.ids_format)
-        vecs_format = self._format(ctx, 'Vectors Format', self.vecs_format)
+        offsets_format = self.input_value(ctx, 'Offsets Format')
+        ids_format = self.input_value(ctx, 'IDs Format')
+        vecs_format = self.input_value(ctx, 'Vectors Format')
 
         offsets = self._read_flat(offsets_file, offsets_format)
         vertex_ids = self._read_flat(ids_file, ids_format)
@@ -77,10 +66,6 @@ class BUFFERIO_NODE_shape_key(BufferIONode):
         return {'ShapeKey': ShapeKeyData(
             offsets=offsets, vertex_ids=vertex_ids,
             vertex_offsets=vertex_offsets)}
-
-    def _format(self, ctx, name, default):
-        value = self.input_value(ctx, name, default)
-        return value if value in dxgi.SUPPORTED_FORMATS else default
 
     @staticmethod
     def _read_flat(filepath, format_name):

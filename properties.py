@@ -1,20 +1,15 @@
-"""BufferIO 数据模型：PropertyGroup 定义、fmt 元素解析填充与属性更新回调。
+"""FMT 元素解析：把 fmt / FrameAnalysis 文本解析成轻量元素对象。
 
-元素集合既挂载在 Scene（侧面板）也挂载在 VB ELEMENT DESC 节点上，
-解析填充逻辑（parse_fmt_elements）由两条路径共用。
+解析结果只用于节点侧栏的「从 FMT 导入」：生成 Vertex Buffer / Index Buffer
+节点与节点框，因此不再依赖 PropertyGroup，也不需要属性更新回调。
 """
 
 import re
 from pathlib import Path
 
-import bpy
-from bpy.props import (
-    BoolProperty, EnumProperty, IntProperty, StringProperty,
-)
-
 from . import dxgi
 from . import fmt_parser
-from .constants import ELEMENT_SEMANTIC_ITEMS, SEMANTIC_GUESS
+from .constants import SEMANTIC_GUESS
 
 
 def _auto_export_name(filepath):
@@ -45,145 +40,52 @@ def _parse_ib_header(filepath):
     return fmt.first_index, fmt.index_count, fmt.byte_offset, fmt.ib_format
 
 
-def _apply_ib_format(target, format_name):
-    """把 ib txt 里读到的格式写入元素/节点（不支持的格式保持原值）"""
-    if format_name and format_name in dxgi.SUPPORTED_FORMATS:
-        target.format = format_name
+class ElementData:
+    """解析出的单个元素（顶点属性或索引缓冲）"""
+
+    def __init__(self):
+        self.enabled = True
+        self.name = ''
+        self.semantic_name = ''
+        self.semantic = 'SKIP'
+        self.semantic_index = 0
+        self.index = 0
+        self.filepath = ''
+        self.ib_txt = ''
+        self.first_index = 0
+        self.index_count = 0
+        self.count = 0
+        self.format = 'R32G32B32_FLOAT'
+        self.input_slot = 0
+        self.offset = 0
+        self.byte_offset = 0
+        self.stride = 0
+        self.source_file = ''
 
 
-def _index_path_update(self, context):
-    """INDEX 项选择 txt 路径后自动解析头部，填入 first index / index count / 格式"""
-    if getattr(self, 'semantic', None) == 'INDEX':
-        fp = self.filepath or getattr(self, 'source_file', '')
-        if fp and Path(fp).suffix.lower() == '.txt':
-            result = _parse_ib_header(fp)
-            if result is not None:
-                self.first_index, self.index_count, self.byte_offset = result[:3]
-                _apply_ib_format(self, result[3])
-    _push_element(self)
+class ElementList(list):
+    """兼容 parse_fmt_elements 的填充接口（add() 追加一个 ElementData）"""
 
+    def add(self):
+        item = ElementData()
+        self.append(item)
+        return item
 
-def _ib_txt_update(self, context):
-    """选择 IB txt 路径后自动解析头部，填入 first index / index count / 格式"""
-    result = _parse_ib_header(self.ib_txt)
-    if result is not None:
-        self.first_index, self.index_count, self.byte_offset = result[:3]
-        _apply_ib_format(self, result[3])
-    _push_element(self)
-
-
-def _host_desc_node(elem):
-    """元素所属的 VB ELEMENT DESC 节点。
-
-    PropertyGroup 的 id_data 返回的是拥有它的节点树（Node 不是 ID），
-    需要再按指针定位宿主节点；挂在 Scene 上的元素返回 None。
-    """
-    tree = elem.id_data
-    if not isinstance(tree, bpy.types.NodeTree):
-        return None
-    pointer = elem.as_pointer()
-    for node in tree.nodes:
-        if node.bl_idname != 'BufferIOSourceFile':
-            continue
-        for item in node.elements:
-            if item.as_pointer() == pointer:
-                return node
-    return None
-
-
-def _push_element(self):
-    """宿主为 VB ELEMENT DESC 节点时，把元素属性写入内部节点组"""
-    node = _host_desc_node(self)
-    if node is not None:
-        from .nodes.element_desc import notify_element_changed
-        notify_element_changed(node, self)
-
-
-def _element_update(self, context):
-    """元素属性变更：宿主为 VB ELEMENT DESC 节点时同步内部节点与输出端口"""
-    node = _host_desc_node(self)
-    if node is not None:
-        from .nodes.element_desc import notify_element_changed
-        notify_element_changed(node, self)
-
-
-class BufferIOElement(bpy.types.PropertyGroup):
-    """FMT 模式下解析出的元素条目"""
-    # Blender 4.2+ 用 id 跟踪列表项身份，启用 template_list 原生多选/拖拽重排
-    id: IntProperty(default=0, options={'HIDDEN'})
-    enabled: BoolProperty(name='Enabled', default=True, update=_element_update)
-    warning: IntProperty(name='Warning', default=0, min=0, max=2,
-                         description='0 OK / 1 red (inconsistent stride or out of bounds) / 2 yellow (byte sum does not match stride)')
-    name: StringProperty(name='Name')
-    semantic_name: StringProperty(name='Semantic Name',
-                                  description='Original semantic name (e.g. POSITION / TANGENT)')
-    semantic: EnumProperty(name='Semantic', items=ELEMENT_SEMANTIC_ITEMS, default='SKIP',
-                           update=_element_update)
-    semantic_index: IntProperty(name='Semantic Index', min=0, default=0,
-                                description='Original semantic index (e.g. the 5 in ATTRIBUTE 5)')
-    index: IntProperty(name='Index', min=0, default=0,
-                       description='Target Semantic Index (e.g. TEXCOORD 0-3), which determines the number of UV / color attributes',
-                       update=_element_update)
-    # 解析数据
-    filepath: StringProperty(name='File Path', subtype='FILE_PATH',
-                             update=_index_path_update,
-                             description='Data file path (filled automatically when loading FMT, can be edited manually); Index Buffer entries may also point to an ib txt (parsed automatically)')
-    ib_txt: StringProperty(name='IB txt', subtype='FILE_PATH',
-                           update=_ib_txt_update,
-                           description='3dmigoto FrameAnalysis ib txt (faces only). Lowest priority: used when there is no file path or first / count are not set')
-    # INDEX 项的 first index / index count，默认 0 表示不启用偏移/限制
-    first_index: IntProperty(name='first index', default=0, min=0,
-                             update=_element_update,
-                             description='First index offset; filled automatically from the txt header after selecting a path, can be edited manually')
-    index_count: IntProperty(name='index count', default=0, min=0,
-                             update=_element_update,
-                             description='Index count; 0 = unlimited; filled automatically from the txt header after selecting a path, can be edited manually')
-    count: IntProperty(name='Count', default=0, min=0,
-                       update=_element_update,
-                       description='Number of elements to read; 0 = unlimited (the end of the buffer may contain invalid data, so the read can be limited to the first N elements)')
-    # 静态枚举（固定顺序，值不随语义变化而漂移）；默认值在创建元素/加载时显式写入
-    format: EnumProperty(name='Format', items=dxgi.FORMAT_ENUM_ITEMS, default='R32G32B32_FLOAT',
-                         update=_element_update)
-    input_slot: IntProperty()
-    offset: IntProperty(name='Element Offset', default=0,
-                        update=_element_update,
-                        description='Vertex attribute: byte offset of the element within the stride (AlignedByteOffset)')
-    byte_offset: IntProperty(name='Byte Offset', min=0, default=0,
-                             update=_element_update,
-                             description='Start byte offset of the data in the buffer file; filled automatically from each txt header when loading FMT, can be edited manually')
-    stride: IntProperty(name='Stride', default=0,
-                        update=_element_update,
-                        description='Byte stride per element; 0 = tight packing (equal to the format byte width)')
-    source_file: StringProperty()
-
-
-def _assign_id(collection, item):
-    """为列表项分配唯一 id（Blender 4.2+ UIList 原生多选/拖拽重排依赖）"""
-    existing = {i.id for i in collection if i != item}
-    item.id = 1
-    while item.id in existing:
-        item.id += 1
-    return item.id
-
-
-# --- fmt 元素解析填充（侧面板加载与 VB ELEMENT DESC 节点共用） -------------
 
 def _add_vertex_item(elements, element, stride, source_file, byte_offset=0):
-    """把 fmt 顶点元素加入元素集合"""
+    """把 fmt 顶点元素加入元素列表"""
     item = elements.add()
-    _assign_id(elements, item)
     item.enabled = element.is_per_vertex
-    # 语义名/索引由列表行内与属性面板显示，name 只保留缓冲槽位/偏移
     item.name = f'vb{element.input_slot} +{element.byte_offset}'
     item.semantic_name = element.semantic_name
     item.semantic = SEMANTIC_GUESS.get(element.semantic_name, 'SKIP')
     item.semantic_index = element.semantic_index
-    # 目标索引默认与语义索引一致，可在属性面板中修改
     item.index = element.semantic_index
     if element.format in dxgi.SUPPORTED_FORMATS:
         item.format = element.format
     else:
-        item.format = 'R32G32B32_FLOAT'  # 兜底：不支持的格式用常见顶点格式占位
+        # 兜底：不支持的格式用常见顶点格式占位
+        item.format = 'R32G32B32_FLOAT'
     item.input_slot = element.input_slot
     item.offset = element.byte_offset
     item.byte_offset = byte_offset
@@ -194,13 +96,8 @@ def _add_vertex_item(elements, element, stride, source_file, byte_offset=0):
 
 
 def _add_ib_item(elements, filepath, ib_txt, format_name, byte_offset):
-    """把索引缓冲作为一个元素项加入集合（semantic=INDEX）
-
-    filepath 为数据文件（buf）；first/vertex 与 ib_txt 从 txt 头部填充，
-    读取优先级：文件路径+first/count -> 文件路径 -> ib txt。
-    """
+    """把索引缓冲作为一个元素加入列表（semantic=INDEX）"""
     item = elements.add()
-    _assign_id(elements, item)
     item.enabled = True
     item.semantic_name = 'INDEX'
     item.semantic = 'INDEX'
@@ -208,11 +105,12 @@ def _add_ib_item(elements, filepath, ib_txt, format_name, byte_offset):
     if format_name in dxgi.SUPPORTED_FORMATS:
         item.format = format_name
     else:
-        item.format = 'R16_UINT'  # 兜底：不支持的格式用常见索引格式占位
+        # 兜底：不支持的格式用常见索引格式占位
+        item.format = 'R16_UINT'
     item.input_slot = -1
-    item.offset = 0  # 索引无步长内偏移；文件起始偏移见 byte_offset
+    item.offset = 0
     item.byte_offset = byte_offset
-    item.stride = 0  # 索引为紧凑数据
+    item.stride = 0
     item.filepath = filepath
     item.name = 'ib'
     # 从 ib txt 头部填充 first index / index count，并保留 txt 作为兜底
@@ -228,7 +126,7 @@ def _add_ib_item(elements, filepath, ib_txt, format_name, byte_offset):
 
 
 def parse_fmt_elements(elements, fmt_path):
-    """解析 .fmt / FrameAnalysis txt 并填充元素集合
+    """解析 .fmt / FrameAnalysis txt 并填充元素列表
 
     返回 (info, ib_settings)；失败抛出异常，由调用方决定如何呈现。
     ib_settings: {'file', 'format', 'offset', 'first', 'count'}

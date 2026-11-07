@@ -2,91 +2,94 @@
 
 将 **vb（顶点缓冲）、ib（索引缓冲）等渲染资源缓冲导入 Blender** 的插件，主要面向基于 **3dmigoto / WWMI** 的 FrameAnalysis 转储资源（`.buf`、`.txt`、`.fmt` 文件）。
 
-插件通过解析资源布局（格式、步长、偏移、语义）重建网格，支持顶点法线/切线、多套 UV、顶点色、骨骼权重与形态键（Shape Keys）等完整属性导入。
+入口只有 **节点编辑器**：在 BufferIO 节点树侧栏选择 FMT 文件，插件自动把节点生成到一个节点框（NodeFrame）里，最后在 Import 节点上点按钮烘焙出网格与骨架。
 
-- 版本：1.3.0
-- 兼容 Blender：5.2+（仅针对 5.2 API，不再兼容 4.x）
+- 版本：1.4.0
+- 兼容 Blender：5.2（仅针对 5.2 API，不再兼容 4.x）
 - 依赖：`numpy`（Blender 自带）
-- 面板位置：3D 视图 > 侧边栏 > BufferIO
+- 入口位置：节点编辑器 > 侧栏（N 键）> BufferIO
 
 ## 功能特性
 
-- **FMT 模式**：加载 `.fmt` / 3dmigoto `txt` 文件，自动解析布局并搜索同前缀的 ib/vb 资源，语义自动猜测、可手动修正；也可手动添加元素逐项指定文件、格式、步长、偏移后导入。
+- **从 FMT 生成节点**：选择 `.fmt`（WWMI 风格）或 3dmigoto FrameAnalysis 的 `txt`，自动解析布局、搜索同前缀的 ib/vb 资源，直接生成 `Vertex Buffer` / `Index Buffer` / `Mesh Assemble` / `Import` 节点并连好线。
+- **节点框组织**：每次导入的节点都挂在同一个 `NodeFrame`（框）下，框名即 FMT 文件名，拖动框即整体移动。
 - **完整属性支持**：位置、法线、切线、多套 UV（`TEXCOORD0-3`）、顶点色、骨骼权重（顶点组）、形态键（Shape Keys）。
 - **骨骼矩阵与自动骨架**：导入 `BONEMATRIX`（`MATRIX3X4_FLOAT` 3×4 蒙皮矩阵）后，自动创建 Armature——所有骨骼 rest 位于原点（无父子），姿态直接应用骨骼矩阵，结合顶点组权重即可正确蒙皮。
 - **形态键导入**：支持两种形态键数据来源（按偏移边界分组的 `SHAPEKEY_OFFSET/ID/OFFSET` 与逐顶点位移 `SHAPEKEY`），导入后命名为 `Deform N` 且数值归零，显示基础网格。
 - **资源自动发现**：根据文件名前缀自动匹配同一资源组的 ib/vb 文件，支持 WWMI 与 FrameAnalysis 两种命名风格。
-- **布局校验**：自动检测步长不一致、格式越界、布局不连续、语义冲突等常见配置错误，并在列表中高亮提示。
-- **语义方案 / 预设**：可把元素配置（语义映射、格式、步长、偏移）保存为 JSON 方案，随插件携带、随时复用。
-- **变换选项**：翻转环绕方向、翻转 UV 的 V 轴、全局缩放、X 轴镜像、坐标轴映射（统一转换到 Blender 的 -Y 前 / Z 上）。
+- **变换选项**：翻转环绕方向、翻转 UV 的 V 轴、全局缩放、X 轴镜像、坐标轴映射（统一转换到 Blender 的 -Y 前 / Z 上），全部在 `Import` 节点上。
 - **顶点压缩**：自动去除未被索引引用的顶点，并重排索引与形态键顶点 id，缩小网格体积。
 
 ## 安装
 
 1. 将 `BufferIO` 文件夹放入 Blender 的插件目录（或直接选择整个文件夹打包为 zip 后通过“安装插件”导入）。
 2. 在 **偏好设置 > 插件** 中勾选 **BufferIO**。
-3. 打开 3D 视图，在 **侧边栏（N 键）> BufferIO** 面板中使用。
-
-> 安装目录下会自动生成 `semantics/` 文件夹，用于存放保存的语义方案。
+3. 把任意编辑器的区域类型切换为 **节点编辑器**，或新建一个节点编辑器区域。
 
 ## 使用方法
 
-### 使用方式
+### 1. 新建 / 打开节点树
 
-1. 点击 **加载 FMT**，选择 `.fmt`（WWMI 风格）或 3dmigoto FrameAnalysis 的 `txt` / `buf` 文件。插件自动：
-   - 解析文件头部的 stride / element 布局；
-   - 搜索同前缀的 `.ib` / `.vb`（或 `.buf`）资源；
-   - 生成元素列表并自动猜测每个元素的语义（可在列表中手动调整，`SKIP` 表示不导入）。
-2. 没有布局文件时，可点击 **添加元素** 手动新增条目，逐项设置语义、格式、步长、偏移、文件路径后导入。
-3. 若元素已存在（手动添加或加载语义预设），可在文件选择对话框右侧勾选 **按tag填路径**：仅按文件名前缀自动填充元素路径，无需 txt 头部，可直接选择 `.buf`。
-4. 点击 **导入** 生成网格。
+在节点编辑器按 `N` 打开 **BufferIO** 侧栏：
 
-> 索引缓冲（`IndexBuffer`）元素会自动置顶；选择 `txt` 路径后会自动解析其头部并填入 `first index` / `index count` / `byte offset`。
+- 如果当前不是在编辑 BufferIO 节点树，侧栏显示 **新建节点树** / **打开场景节点树**。
+- 新建后节点编辑器会自动切换到该树，并记录在场景上（`Scene.bufferio_node_tree`），下次可一键打开。
 
-## 节点编辑器
+### 2. 从 FMT 导入
 
-节点编辑器新建 **BufferIO 节点树** 后，可通过 `Shift+A` 添加以下节点：
+点击侧栏的 **Import from FMT**，选择 `.fmt`（WWMI 风格）或 3dmigoto FrameAnalysis 的 `txt` / `buf` 文件。插件自动：
+
+- 解析文件头部的 stride / element 布局；
+- 搜索同前缀的 `.ib` / `.vb`（或 `.buf`）资源；
+- 在光标位置生成一个节点框，框内创建：
+  - 一个 `Index Buffer` 节点（含 ib txt 时自动解析 `first index` / `index count` / `byte offset`）；
+  - 每个顶点元素一个 `Vertex Buffer` 节点，节点标签为 **`<Semantic Name> <Semantic Index>`**（如 `POSITION 0`、`TEXCOORD 1`）；
+  - 一个 `Mesh Assemble` 节点（按元素数量自动增减 `ELEMENT[i]` 端口）与一个 `Import` 节点，并自动连好线。
+
+无法自动识别的元素会保留为**静音（mute）节点**，标签使用原始语义名（如 `ATTRIBUTE 3`）：手动改语义后取消静音并连到 `Mesh Assemble` 的 `ELEMENT[i]` 端口即可。
+
+可选参数（文件选择对话框右侧，整合为一个预设）：
+
+- **Preset**：`Auto` / `WuWa`。选 `WuWa` 时会自动套用下面的搜索项与默认值，并把 FrameAnalysis 的 `ATTRIBUTE n` 映射为 `POSITION` / `TANGENT` / `NORMAL` / `TEXCOORD 0-3` / `COLOR` / 两组骨骼权重；映射结果直接显示在生成的 `Vertex Buffer` 节点标签上，并可在节点上逐项修改语义与索引。
+- **Search Shape Keys**（勾选框）：WuWa 预设默认勾选；按同前缀 vb6 的 hash 定位形态键 CS draw call，创建一个多槽位的 `ShapeKey Assemble` 节点并自动接线。
+- **Bone Matrix Tag**：WuWa 预设默认 `vs-cb4`；自动查找同 draw call 的矩阵文件并接到 `Import` 的 `Matrix` 输入。
+
+`Import` 节点的默认值：Forward `Y`、Up `Z`、Scale `0.01`，Mirror X / Flip Winding / Flip UV 全部开启。
+
+### 3. 烘焙
+
+选中 `Import` 节点，点节点上的 **Import** 按钮（或侧栏/节点自带按钮）：
+
+- 只接 `Mesh` → 生成网格对象；
+- 只接 `Matrix` → 只生成骨架；
+- 两者都接 → 生成带 Armature 修改器与父子关系的蒙皮网格。
+
+求值失败时错误文本会写在对应节点上，同时以报告形式输出。
+
+## 节点
+
+在 BufferIO 节点树中按 `Shift+A` 可添加：
 
 | 节点 | 说明 |
 | --- | --- |
-| `VB ELEMENT DESC` | 资源元素描述节点组：外部只有一个 `Mesh` 输出端口，内部由 `Vertex Buffer` / `IndexBuffer` 节点组成 |
-| `Node Group` | 空节点组：先按 `Tab` 进入内部搭链，再在 `Group Interface` 里定义对外端口（`Ctrl+G` 编组也生成这种节点） |
-| `IndexBuffer` | 读取索引缓冲（文件或 3dmigoto ib txt），输出索引 Socket；格式限定 `R16_UINT` / `R32_UINT` |
-| `Vertex Buffer` | 读取任意顶点缓冲并标注语义（节点组的内部元素节点） |
-| `Bone Matrix` / `ShapeKey` / `ShapeKey Assemble` / `Mesh Assemble` / `Import` | 装配链节点（缩放 / 镜像 / 轴转换 / 翻转已并入 `Import`，不再单独成节点） |
-| `格式` / `字符串` / `浮点值` / `整数值` / `布尔值` | 值节点，输出常量供其它节点的输入端口使用 |
+| `Index Buffer` | 读取索引缓冲（文件或 3dmigoto ib txt），输出索引；格式限定 `R16_UINT` / `R32_UINT` |
+| `Vertex Buffer` | 读取任意顶点缓冲并标注语义，节点标签显示 `<Semantic Name> <Semantic Index>` |
+| `Bone Matrix` | 读取骨骼蒙皮矩阵 |
+| `ShapeKey Resource` | 读取一组分段形态键数据 |
+| `ShapeKey Assemble` | 按槽位（`SHAPEKEY[i]`，用节点上的 +/− 增减）把多组形态键追加到网格（`Mesh` → `Mesh`） |
+| `Mesh Assemble` | 装配索引与全部顶点属性，输出 `Mesh` |
+| `Import` | 烘焙出网格 / 骨架；缩放、镜像、轴转换、翻转均在此节点 |
+| `Format` / `String` / `Float` / `Int` / `Bool` | 值节点，输出常量供其它节点的输入端口使用 |
 
-各节点的参数都有对应的输入端口（文件、格式、步长、偏移、数量等）：端口已连接时优先使用上游值，未连接时直接在端口上编辑（节点上不再重复一套控件）。`IndexBuffer` 的 ib txt 只作为属性自动解析入口，不设输入；解析成功后会自动断开「格式 / 偏移 / 起始索引 / 索引数量」的输入连线，让解析结果生效。
+各节点的参数都有对应的输入端口（文件、格式、步长、偏移、数量等）：端口已连接时优先使用上游值，未连接时直接在端口上编辑（节点上不再重复一套控件）。`Index Buffer` 的 ib txt 只作为属性自动解析入口，不设输入；解析成功后会自动断开「格式 / 偏移 / 起始索引 / 索引数量」的输入连线，让解析结果生效。
 
 `Vertex Buffer` 在语义为 `NORMAL` 时额外提供 **算法** 选项：`保持`（默认，按格式规范解码）与 `终末地`（八面体法线解码，选中时自动把格式切换为 `R10G10B10A2_UNORM` 并断开格式输入连线）。
-
-### 通用节点组（Ctrl+G）
-
-框选若干节点后按 `Ctrl+G`，会把它们合并为一个 `节点组` 节点：节点与内部连线复制进新建的内部树，跨越选区的连线转成组的输入/输出端口，并按原位置自动重连。之后同样按 `Tab` 进入内部编辑，再按 `Tab` 返回上层。
-
-- 节点上的 **Ungroup** 按钮（或 `Ctrl+Alt+G`）会把组节点还原成普通节点，内部连线与外部连线一并恢复。
-- 节点上有 **Tree** 数据块选择器，可直接复用已有的 BufferIO 节点组树；切换后端口立即按新接口重建。
-- 组节点名称跟随内部树名（在侧栏 **Group Name** 改名会同步到所有实例）；手动改过节点 label 后不再被覆盖。
-- 端口实时同步：修改组内接口（增删 / 改名）后，外层组节点的端口会在约 0.6 秒内自动对齐，不必 Tab 进出（同一棵内部树的多个实例一起更新）。
-- 进入内部后，侧边栏 **Group Interface** 区域可增删输入/输出端口、改名、写描述，并用 ↑/↓ 调整端口顺序；返回父级时组节点外部端口自动同步。
-- 标量端口（Float / Int / Bool / String / Format）未连线时，组节点端口上直接出现可编辑控件（按实例保存）；填 0 / 空值视为未填写，仍由内部节点自身属性兜底。
-- 组节点上显示内部节点数、输出数与最近一次错误；求值失败时错误文本直接留在节点上。
-- 选中组节点时，侧边栏也会显示它的接口列表，可在组外增删/改名端口，改完点 **Sync Ports**（节点上也有同名按钮）立即刷新外部端口；同一棵内部树的多个实例会一起刷新。
-- 空组节点第一次点 **Edit Interior** 时会自动补建内部树与 `Group Input` / `Group Output` 节点；组内自引用或 `A → B → A` 的循环编组在求值时会直接报错，不会卡死。
-
-`VB ELEMENT DESC` 是一个**可进入内部的节点组**（行为与材质节点组一致）：
-
-- 选中节点按 `Tab`（或节点上的 **编辑内部**）进入内部树；在内部再按 `Tab`（或侧边栏 **返回上层**）退出并同步外部元素列表。
-- 内部是真正的节点组结构：`Group Input` / `Group Output` 节点 + 树接口，元素节点先汇入 `Mesh Assemble` 再接到唯一的 `Mesh` 输出端口（外部也就只有一个网格输出）。
-- 外部列表、属性与输出端口都是内部节点的投影：在外部改属性会写入内部节点，在内部改节点后返回会重建外部列表与端口。
-- **保存预设 / 加载预设** 直接作用于内部节点：加载预设会按新配置重建内部节点组（保留已有文件路径）。
-- 解析 `.fmt` / `txt` 后会自动创建内部节点；旧版保存的节点在首次绘制或进入内部时自动补建。
 
 ## 支持的语义
 
 | 语义 | 说明 |
 | --- | --- |
-| `IndexBuffer` | 三角形索引缓冲（支持直接解析 3dmigoto ib txt） |
+| `INDEX` | 三角形索引缓冲（支持直接解析 3dmigoto ib txt） |
 | `POSITION` | 顶点位置（必需） |
 | `NORMAL` | 顶点法线 |
 | `TANGENT` | 顶点切线（导入到 `TANGENT` 自定义属性，Blender 无原生切线存储） |
@@ -99,27 +102,19 @@
 | `SHAPEKEY_VERTEXOFFSET` | 形态键顶点位移向量列表（`R16G16B16_FLOAT`） |
 | `SHAPEKEY` | 形态键逐顶点位移（索引即 Deform 编号，如 `SHAPEKEY 23` = `Deform 23`） |
 | `BONEMATRIX` | 骨骼 3×4 矩阵（`MATRIX3X4_FLOAT`，索引即骨骼号，与 `BLENDINDICES` 对应） |
-| `SKIP` | 不导入该元素（仅 FMT 模式） |
+| `SKIP` | 不导入该元素 |
 
-其中 `IndexBuffer` 与 `POSITION` 为必需语义，缺失时导入会给出警告。
+`Vertex Buffer` 只处理逐顶点属性；索引走 `Index Buffer`，形态键分段数据走 `ShapeKey Resource`，骨骼矩阵走 `Bone Matrix`。
 
 ## 变换选项
 
+均在 `Import` 节点上：
+
 - **翻转环绕方向**：翻转三角形顶点顺序，影响面法线方向（默认开启）。
 - **翻转 UV 的 V 轴**：`V = 1 - V`（默认开启）。
-- **镜像（X 轴）**：沿 X 轴镜像网格，并同步翻转法线/切线 X 分量与环绕方向。
+- **镜像（X 轴）**：沿 X 轴镜像网格，并同步翻转法线/切线 X 分量与环绕方向（默认开启）。
 - **全局缩放**：顶点坐标缩放系数，如鸣潮（WuWa）游戏单位转米可用 `0.01`（默认）。
 - **坐标轴（前 / 上）**：源资源的朝前轴与朝上轴，导入时统一映射到 Blender 的 -Y 前 / Z 上。
-
-## 布局校验规则
-
-点击 **校验步长/偏移** 可手动触发校验，状态图标显示在列表项前：
-
-- **红色（ERROR）**：同文件步长不一致；格式越界（偏移 + 字节宽度 > 步长）；语义冲突（同一原始语义被重复映射）。
-- **黄色（QUESTION）**：相邻项偏移差 ≠ 前一项格式字节宽度（布局不连续）。
-- 缺失必需语义（`IndexBuffer` / `POSITION`）时给出警告。
-
-校验仅作提示，不影响导入。
 
 ## 支持的 DXGI 格式
 
@@ -139,36 +134,50 @@
 - **WWMI（.fmt）**：`Component 0.fmt` → `Component 0.ib` / `Component 0.vb`
 - **FrameAnalysis（txt）**：`000984-vb0=hash-vs=...-ps=....txt` → 同前缀 `000984-ib=*.txt/.buf`、`000984-vb*=*.buf`
 
+## 与原 3D 视图侧栏的差异
+
+插件不再提供 3D 视图侧边栏，原面板功能在节点侧的对应：
+
+| 原面板功能 | 节点侧现状 |
+| --- | --- |
+| 加载 FMT、逐元素生成 | 侧栏 **Import from FMT**，一次性生成节点框 |
+| 元素列表逐项编辑（语义 / 格式 / 步长 / 偏移 / 文件） | 每个 `Vertex Buffer` 节点即一个元素，参数在端口上编辑 |
+| 手动添加元素 | `Shift+A` 添加 `Vertex Buffer` 节点后手动填参数 |
+| 布局校验（红/黄高亮、校验全部、缺失必需语义提示） | **未保留**（求值时对缺少 POSITION / 索引等会直接报错，但不再有逐项可视化校验） |
+| 语义方案（JSON 预设） | 改为 **Blender 原生操作项预设**（`Import from FMT` 文件对话框右侧的下拉菜单，可添加 / 移除自定义预设）；语义映射表（`(Semantic Name, Semantic Index) -> (Semantic, Target Index)`）以 `Semantic Mapping` 属性列表直接显示并可逐条调整，形态键搜索 / 骨骼矩阵 tag 也可在右侧直接修改 |
+| 批量目录导入（一次导入多组 draw call） | **未保留**（一次导入一个 FMT；可重复导入到同一棵树，每组一个节点框） |
+| 按 .buf 文件名自动推导对象名 | 仍用于 `Bone Matrix` 节点命名；网格对象名在 `Import` 节点上手动设置 |
+
+语义映射以操作符属性形式暴露（`operators.py` 的 `BUFFERIO_AttributeItem`），预设即操作符属性快照。操作符 `bl_options` 含 `'PRESET'`，Blender 会在文件对话框右侧自动绘制原生"Operator Presets"行（`WM_MT_operator_presets` 下拉 + 添加/移除），预设保存在 Blender 用户目录 `presets/operator/bufferio.node_import_fmt/`；内置 WuWa 预设随插件分发在 `presets/operator/bufferio.node_import_fmt/WuWa.py`（由 `__init__.py` 注册预设路径后出现在菜单中）。
+
 ## 目录结构
 
 ```
 BufferIO/
 ├── __init__.py      # 插件入口：Scene 属性定义、模块注册
-├── constants.py     # 语义枚举、坐标轴、目录、动态枚举辅助
-├── properties.py    # PropertyGroup 数据模型与属性更新回调
-├── core.py          # 校验、顶点数组收集、网格构建与链接
-├── operators.py     # 全部操作符
-├── ui.py            # UIList 与主面板
-├── buffer_io.py     # 网格 / 骨架对象构建
+├── constants.py     # 语义枚举、坐标轴
+├── properties.py    # FMT 解析为轻量元素对象（导入时一次性使用）
+├── core.py          # 索引读取、形态键截断、网格构建与链接
+├── operators.py     # 从 FMT 生成节点（节点框内自动装配）
+├── buffer_io.py     # 缓冲读取、网格 / 骨架对象构建
 ├── storage.py       # 底层二进制读取（mmap 缓存）、索引解析与顶点压缩
 ├── dxgi.py          # DXGI 格式定义
 ├── fmt_parser.py    # fmt / 3dmigoto txt 解析与资源发现
-├── nodes/           # 节点系统
-│   ├── element_desc.py      # VB ELEMENT DESC 节点组（内部由元素节点组成）
-│   ├── element_semantic.py  # Vertex Buffer 元素节点（原“通用缓冲 / Buffer Semantic”）
-│   ├── index_buffer.py      # IndexBuffer 索引节点
-│   └── ...                  # 装配 / 变换 / 输出 / 骨骼 / 形态键等
-└── semantics/       # 语义映射方案（JSON，随插件保存）
-    └── wuwa.json    # 鸣潮（WuWa）示例语义方案
+└── nodes/           # 节点系统
+    ├── tree.py              # BufferIO 节点树
+    ├── sockets.py           # 自定义 Socket
+    ├── base.py              # 节点基类
+    ├── evaluator.py         # 拉取式求值器
+    ├── element_semantic.py  # Vertex Buffer 节点
+    ├── index_buffer.py      # Index Buffer 节点
+    ├── bone_matrix.py       # Bone Matrix 节点
+    ├── shape_key.py         # ShapeKey Resource 节点
+    ├── shape_key_apply.py   # ShapeKey Assemble 节点
+    ├── assemble.py          # Mesh Assemble 节点
+    ├── output.py            # Import 节点
+    ├── value.py             # 值节点
+    └── ui.py                # 侧栏面板、操作符、Shift+A 菜单
 ```
-
-## 附带示例
-
-仓库自带基于 **鸣潮（WuWa）** 资源的示例配置：
-
-- `semantics/wuwa.json`：FrameAnalysis 转储的 `ATTRIBUTE n` → 语义映射（如 `ATTRIBUTE 0` → `POSITION`）。
-
-可在 **Load Semantics** 中直接加载使用，作为其他游戏的参考模板。
 
 ## 说明
 

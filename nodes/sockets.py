@@ -1,13 +1,16 @@
-"""BufferIO 自定义节点 Socket：按数据类型区分颜色与形状，只表达拓扑连线。"""
+"""BufferIO 自定义节点 Socket：按数据类型区分颜色与形状，只表达拓扑连线。
+
+与原生节点一致的默认值模型：值类 Socket（String/Float/Int/Bool/Format）
+自带 default_value，未连接时直接在端口上编辑。
+"""
 
 import bpy
 
+from .. import dxgi
 from ..constants import INDEXED_SEMANTICS
 
 # Socket 类型 -> 颜色（RGBA）
 SOCKET_COLORS = {
-    'BufferIOSocket': (0.30, 0.55, 1.00, 1.0),           # 旧版通用（按数组处理）
-    'BufferIOSocketLayout': (0.22, 0.72, 0.36, 1.0),     # 布局：绿
     'BufferIOSocketArray': (0.30, 0.55, 1.00, 1.0),      # 数组：蓝
     'BufferIOSocketIndex': (1.00, 0.58, 0.15, 1.0),      # 索引：橙
     'BufferIOSocketBoneMatrix': (0.95, 0.30, 0.30, 1.0),  # 骨骼矩阵：红
@@ -18,12 +21,11 @@ SOCKET_COLORS = {
     'BufferIOSocketFloat': (0.62, 0.62, 0.62, 1.0),      # 浮点值：灰
     'BufferIOSocketInt': (0.80, 0.80, 0.80, 1.0),        # 整数值：浅灰
     'BufferIOSocketBool': (0.90, 0.45, 0.60, 1.0),       # 布尔：粉
+    'BufferIOSocketFile': (0.35, 0.65, 0.85, 1.0),       # 文件路径：蓝灰
 }
 
 # Socket 类型 -> 形状（CIRCLE / SQUARE / DIAMOND / *_DOT / LINE / LIST）
 SOCKET_SHAPES = {
-    'BufferIOSocket': 'CIRCLE',
-    'BufferIOSocketLayout': 'SQUARE',
     'BufferIOSocketArray': 'CIRCLE',
     'BufferIOSocketIndex': 'SQUARE_DOT',
     'BufferIOSocketBoneMatrix': 'DIAMOND',
@@ -34,14 +36,12 @@ SOCKET_SHAPES = {
     'BufferIOSocketFloat': 'CIRCLE',
     'BufferIOSocketInt': 'CIRCLE_DOT',
     'BufferIOSocketBool': 'DIAMOND',
+    'BufferIOSocketFile': 'SQUARE',
 }
 
 
 def _semantic_label(node, socket=None):
     """推导这条连线承载的语义，用于 Socket 文字提示"""
-    if getattr(node, 'bl_idname', '') == 'BufferIOSourceFile':
-        # VB ELEMENT DESC 的输出端口名本身就是目标语义（POSITION / TEXCOORD1 …）
-        return socket.name if socket is not None else ''
     semantic = getattr(node, 'semantic', '')
     if not semantic or semantic in {'SKIP', 'INDEX'}:
         return ''
@@ -52,6 +52,10 @@ def _semantic_label(node, socket=None):
     if semantic in INDEXED_SEMANTICS and index:
         return f'{semantic}{index}'
     return semantic
+
+
+def _has_default_value(socket):
+    return socket.bl_rna.properties.get('default_value') is not None
 
 
 class _BufferIOSocketBase(bpy.types.NodeSocket):
@@ -73,30 +77,15 @@ class _BufferIOSocketBase(bpy.types.NodeSocket):
             semantic = _semantic_label(link.from_node, link.from_socket)
             layout.label(text=f'{text}  {semantic}' if semantic else text)
             return
-        # 节点可自定义未连接端口的控件（节点组用它绘制输入默认值）
-        hook = getattr(node, 'draw_socket_default', None)
-        if hook is not None and hook(layout, self, text):
-            return
-        # 未连接的输入端口直接编辑节点属性，避免节点上再重复一套控件
-        prop = getattr(node, 'SOCKET_PROPERTIES', {}).get(self.name)
-        if prop and node.bl_rna.properties.get(prop) is not None:
-            layout.prop(node, prop, text=text)
+        # 未连接的输入端口直接编辑 socket 自带的默认值（与原生 socket 一致）
+        if _has_default_value(self):
+            layout.prop(self, 'default_value', text=text)
             return
         layout.label(text=text)
 
-    def draw_color(self, context, node):
-        return self.COLOR
-
-
-class BufferIOSocket(_BufferIOSocketBase):
-    """旧版通用 Socket（已保存的节点树继续可用）"""
-    bl_idname = 'BufferIOSocket'
-
-
-class BufferIOSocketLayout(_BufferIOSocketBase):
-    bl_idname = 'BufferIOSocketLayout'
-    bl_label = 'Layout'
-    COLOR = SOCKET_COLORS['BufferIOSocketLayout']
+    @classmethod
+    def draw_color_simple(cls):
+        return cls.COLOR
 
 
 class BufferIOSocketArray(_BufferIOSocketBase):
@@ -134,11 +123,17 @@ class BufferIOSocketFormat(_BufferIOSocketBase):
     bl_label = 'Format'
     COLOR = SOCKET_COLORS['BufferIOSocketFormat']
 
+    default_value: bpy.props.EnumProperty(
+        name='Format', items=dxgi.FORMAT_ENUM_ITEMS,
+        default='R32G32B32_FLOAT')
+
 
 class BufferIOSocketString(_BufferIOSocketBase):
     bl_idname = 'BufferIOSocketString'
     bl_label = 'String'
     COLOR = SOCKET_COLORS['BufferIOSocketString']
+
+    default_value: bpy.props.StringProperty(name='Value', default='')
 
 
 class BufferIOSocketFloat(_BufferIOSocketBase):
@@ -146,11 +141,15 @@ class BufferIOSocketFloat(_BufferIOSocketBase):
     bl_label = 'Float'
     COLOR = SOCKET_COLORS['BufferIOSocketFloat']
 
+    default_value: bpy.props.FloatProperty(name='Value', default=0.0)
+
 
 class BufferIOSocketInt(_BufferIOSocketBase):
     bl_idname = 'BufferIOSocketInt'
     bl_label = 'Int'
     COLOR = SOCKET_COLORS['BufferIOSocketInt']
+
+    default_value: bpy.props.IntProperty(name='Value', default=0)
 
 
 class BufferIOSocketBool(_BufferIOSocketBase):
@@ -158,12 +157,122 @@ class BufferIOSocketBool(_BufferIOSocketBase):
     bl_label = 'Bool'
     COLOR = SOCKET_COLORS['BufferIOSocketBool']
 
+    default_value: bpy.props.BoolProperty(name='Value', default=False)
+
+
+class BufferIOSocketFile(_BufferIOSocketBase):
+    """文件路径：default_value 用 FILE_PATH 子类型，端口上自带文件夹浏览按钮"""
+    bl_idname = 'BufferIOSocketFile'
+    bl_label = 'File'
+    COLOR = SOCKET_COLORS['BufferIOSocketFile']
+
+    default_value: bpy.props.StringProperty(
+        name='Path', subtype='FILE_PATH', default='')
+
+
+# ---------------------------------------------------------------------------
+# 节点组接口 Socket：让 BufferIO 树可以被打包为节点组（与原生节点组一致）
+# ---------------------------------------------------------------------------
+
+class _BufferIOInterfaceSocketBase(bpy.types.NodeTreeInterfaceSocket):
+    """节点组接口 Socket 基类：接口默认值与成员 socket 默认值双向同步"""
+
+    def draw(self, context, layout):
+        if _has_default_value(self):
+            layout.prop(self, 'default_value')
+
+    def init_socket(self, node, socket, data_path):
+        if _has_default_value(socket):
+            socket.default_value = self.default_value
+
+    def from_socket(self, node, socket):
+        if _has_default_value(socket):
+            self.default_value = socket.default_value
+
+
+class BufferIOInterfaceSocketArray(_BufferIOInterfaceSocketBase):
+    bl_idname = 'BufferIOInterfaceSocketArray'
+    bl_label = 'Array'
+    bl_socket_idname = 'BufferIOSocketArray'
+
+
+class BufferIOInterfaceSocketIndex(_BufferIOInterfaceSocketBase):
+    bl_idname = 'BufferIOInterfaceSocketIndex'
+    bl_label = 'Index'
+    bl_socket_idname = 'BufferIOSocketIndex'
+
+
+class BufferIOInterfaceSocketBoneMatrix(_BufferIOInterfaceSocketBase):
+    bl_idname = 'BufferIOInterfaceSocketBoneMatrix'
+    bl_label = 'Bone Matrix'
+    bl_socket_idname = 'BufferIOSocketBoneMatrix'
+
+
+class BufferIOInterfaceSocketShapeKey(_BufferIOInterfaceSocketBase):
+    bl_idname = 'BufferIOInterfaceSocketShapeKey'
+    bl_label = 'Shape Key'
+    bl_socket_idname = 'BufferIOSocketShapeKey'
+
+
+class BufferIOInterfaceSocketMesh(_BufferIOInterfaceSocketBase):
+    bl_idname = 'BufferIOInterfaceSocketMesh'
+    bl_label = 'Mesh'
+    bl_socket_idname = 'BufferIOSocketMesh'
+
+
+class BufferIOInterfaceSocketFormat(_BufferIOInterfaceSocketBase):
+    bl_idname = 'BufferIOInterfaceSocketFormat'
+    bl_label = 'Format'
+    bl_socket_idname = 'BufferIOSocketFormat'
+
+    default_value: bpy.props.EnumProperty(
+        name='Format', items=dxgi.FORMAT_ENUM_ITEMS,
+        default='R32G32B32_FLOAT')
+
+
+class BufferIOInterfaceSocketString(_BufferIOInterfaceSocketBase):
+    bl_idname = 'BufferIOInterfaceSocketString'
+    bl_label = 'String'
+    bl_socket_idname = 'BufferIOSocketString'
+
+    default_value: bpy.props.StringProperty(name='Value', default='')
+
+
+class BufferIOInterfaceSocketFloat(_BufferIOInterfaceSocketBase):
+    bl_idname = 'BufferIOInterfaceSocketFloat'
+    bl_label = 'Float'
+    bl_socket_idname = 'BufferIOSocketFloat'
+
+    default_value: bpy.props.FloatProperty(name='Value', default=0.0)
+
+
+class BufferIOInterfaceSocketInt(_BufferIOInterfaceSocketBase):
+    bl_idname = 'BufferIOInterfaceSocketInt'
+    bl_label = 'Int'
+    bl_socket_idname = 'BufferIOSocketInt'
+
+    default_value: bpy.props.IntProperty(name='Value', default=0)
+
+
+class BufferIOInterfaceSocketBool(_BufferIOInterfaceSocketBase):
+    bl_idname = 'BufferIOInterfaceSocketBool'
+    bl_label = 'Bool'
+    bl_socket_idname = 'BufferIOSocketBool'
+
+    default_value: bpy.props.BoolProperty(name='Value', default=False)
+
+
+class BufferIOInterfaceSocketFile(_BufferIOInterfaceSocketBase):
+    bl_idname = 'BufferIOInterfaceSocketFile'
+    bl_label = 'File'
+    bl_socket_idname = 'BufferIOSocketFile'
+
+    default_value: bpy.props.StringProperty(
+        name='Path', subtype='FILE_PATH', default='')
+
 
 def _apply_shape(socket, idname):
-    try:
-        socket.display_shape = SOCKET_SHAPES.get(idname, 'CIRCLE')
-    except Exception:
-        pass
+    socket.display_shape = SOCKET_SHAPES.get(idname, 'CIRCLE')
 
 
 def new_input(node, idname, name, multi_input=False):
@@ -183,8 +292,6 @@ def new_output(node, idname, name):
 
 
 CLASSES = (
-    BufferIOSocket,
-    BufferIOSocketLayout,
     BufferIOSocketArray,
     BufferIOSocketIndex,
     BufferIOSocketBoneMatrix,
@@ -195,4 +302,16 @@ CLASSES = (
     BufferIOSocketFloat,
     BufferIOSocketInt,
     BufferIOSocketBool,
+    BufferIOSocketFile,
+    BufferIOInterfaceSocketArray,
+    BufferIOInterfaceSocketIndex,
+    BufferIOInterfaceSocketBoneMatrix,
+    BufferIOInterfaceSocketShapeKey,
+    BufferIOInterfaceSocketMesh,
+    BufferIOInterfaceSocketFormat,
+    BufferIOInterfaceSocketString,
+    BufferIOInterfaceSocketFloat,
+    BufferIOInterfaceSocketInt,
+    BufferIOInterfaceSocketBool,
+    BufferIOInterfaceSocketFile,
 )
